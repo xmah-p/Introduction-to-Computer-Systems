@@ -1,0 +1,6 @@
+BasedOnStyle: Google
+AccessModifierOffset: -4
+AlignAfterOpenBracket: Align
+IndentWidth: 4
+NamespaceIndentation: Inner
+TabWidth: 4
