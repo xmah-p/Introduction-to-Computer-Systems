@@ -406,8 +406,8 @@ ret
 
 - `SAL k,Dest`：左移
 - `SHL k,Dest`：左移（等同于 `SAL`）
-- `SAR k,Dest`：算术右移
-- `SHR k,Dest`：逻辑右移
+- `SAR k,Dest`：算术右移（补码）
+- `SHR k,Dest`：逻辑右移（无符号数）
 
 移位量 `k` 可以是**立即数**或者**单字节寄存器 `%cl`**。x86-64 中，移位量是**由 `%cl` 寄存器的低位给出**的。即，若 `%cl` 的值位 `0xFF`，则 `salb %cl,%rax` 会将 `%rax` 的值左移 7 位，`salw` 会移 15 位，`sall` 会移 31 位，而 `salq` 会移 63 位。
 
@@ -526,6 +526,9 @@ comp:
 | `jb Label` | `jnae` | `CF` | 低于（无符号 <） |
 | `jbe Label` | `jna` | `CF|ZF` | 低于或相等（无符号 <=） |
 
+- 直接跳转：`jmp .L1` 跳转目标是作为指令的一部分编码的
+- 间接跳转：`jmp *%rax` `jmp *(%rax)` 跳转目标从寄存器或内存中读出
+
 无条件跳转可以是直接跳转，也可以是间接跳转。条件跳转只能是直接跳转。
 
 跳转指令有几种不同的编码，最常用的是 PC 相对（PC-relative）的，其次是给出“绝对”地址。PC 相对的机器代码会将**目标指令的地址**与**紧跟在跳转指令之后的指令的地址**之间的差作为目标的编码，这些地址偏移量可以编码为 1, 2 或 4 字节。“绝对”地址的编码直接用 4 个字节指定目标。
@@ -570,4 +573,574 @@ done:
 ### 条件传送
 
 
+数据的条件转移计算一个条件操作的两种结果，然后根据条件是否满足从中选取一个。这种操作无法完全替代跳转指令，但更符合现代处理器的性能特性。它可以用一条条件传送指令实现。
+
+```c
+long absdiff(long x, long y) {
+    long res;
+    if (x < y) 
+        res = y - x;
+    else
+        res = x - y;
+    return res;
+}
+
+// 使用条件赋值的实现
+long cmovdiff(long x, long y) {
+    long rval = y - x;
+    long eval = x - y;
+    long ntest = x >= y;
+    if (ntest) rval = eval;
+    return rval;
+}
+```
+
+```x86asm
+long absdiff(long x, long y)
+x in %rdi, y in %rsi
+absdiff:
+    movq   %rsi, %rax    ; %rax = y
+    subq   %rdi, %rax    ; %rax = y - x
+    movq   %rdi, %rdx
+    subq   %rsi, %rdx    ; %rdx = x - y
+    cmpq   %rsi, %rdi
+    cmovge %rdx, %rax    ; if (x >= y) rval = eval
+    ret
+```
+
+| 指令 | 同义名 | 传送条件 | 描述 |
+| :----: | :----: | :----: | :----: |
+| `cmove S, R` | `cmovz` | `ZF` | 相等 / 零 |
+| `cmovne S, R` | `cmovnz` | `~ZF` | 不等 / 非零 |
+| `cmovs S, R` |  | `SF` | 负 |
+| `cmovns S, R` |  | `~SF` | 非负 |
+| `cmovg S, R` | `cmovnle` | `~(SF^OF)&~ZF` | 大于（有符号 >） |
+| `cmovge S, R` | `cmovnl` | `~(SF^OF)` | 大于等于（有符号 >=） |
+| `cmovl S, R` | `cmovnge` | `SF^OF` | 小于（有符号 <） |
+| `cmovle S, R` | `cmovng` | `(SF^OF)|ZF` | 小于等于（有符号 <=） |
+| `cmova S, R` | `cmovnbe` | `~CF&~ZF` | 超过（无符号 >） |
+| `cmovae S, R` | `cmovnb` | `~CF` | 超过或相等（无符号 >=） |
+| `cmovb S, R` | `cmovnae` | `CF` | 低于（无符号 <） |
+| `cmovbe S, R` | `cmovna` | `CF|ZF` | 低于或相等（无符号 <=） |
+
+以上条件传送指令的源操作数可以是**寄存器或内存地址**，目的操作数必须是寄存器。**源和目的的值必须是 16、32 或 64 位长**。无条件指令的操作数长度显式编码在指令名中（如 `movw`）；对于条件传送指令，汇编器可以从目标寄存器推断操作数长度，因此不需要在指令名中显式指定。
+
+和条件传送（JMP）不同，处理器无需预测测试的结果就可以执行条件传送。
+
+```c
+// 示例
+    v = test-expr ? then-expr : else-expr;
+
+// jmp
+    if (!test-expr)
+        goto false;
+    v = then-expr
+    goto done;
+false:
+    v = else-expr
+done:
+// then-expr 和 else-expr 中只有一个会被求值
+
+// cmov
+    v = then-expr;
+    ve = else-expr;
+    if (!test-expr)
+        v = ve;
+// then-expr 和 else-expr 都会被求值
+```
+
+如果 `then-expr` 和 `else-expr` 中的任意一个可能**产生错误或副作用**，那么就不能用条件传送指令实现。比如，`return (ptr ? *ptr : 0);` 就必须用分支代码编译，否则会出现间接引用空指针的错误。其次，如果 `then-expr` 和 `else-expr` 计算很复杂，那么用条件传送指令实现可能会降低性能。
+
+
+### 循环
+
+#### `do-while`
+
+```c
+do
+    body-statement
+    while (test-expr);
+
+// 会被编译成
+
+loop:
+    body-statement
+    if (test-expr)
+        goto loop;
+
+// 示例：
+
+// c
+long fact_do(long n) {
+    long res = 1;
+    do {
+        res *= n;
+        n -= 1;
+    } while (n > 1);
+    return res;
+}
+
+// x86acm-like c
+long fact_do_goto(long n) {
+    long res = 1;
+loop:
+    res *= n;
+    n -= 1;
+    if (n > 1)
+        goto loop;
+    return res;
+}
+
+// x86asm
+n in %rdi
+fact_do:
+    movl    $1, %eax    ; same as movq
+.L2:
+    imulq   %rdi, %rax
+    subq    $1, %rdi
+    cmpq    $1, %rdi
+    jg      .L2
+    rep; ret
+```
+
+#### `while`
+
+```c
+while (test-expr)
+    body-statement
+
+// 会被编译成
+
+// 1. jump to middle
+    goto test;
+loop:
+    body-statement
+test:
+    if (test-expr)
+        goto loop;
+
+// 示例
+
+long fact_while(long n) {
+    long res = 1;
+    while (n > 1) {
+        res *= n;
+        n -= 1;
+    }
+    return res;
+}
+
+// x86asm-like c
+long fact_while_jm_goto(long n) {
+    long res = 1;
+    goto test;
+loop:
+    res *= n;
+    n -= 1;
+test:
+    if (n > 1)
+        goto loop;
+    return res;
+}
+
+// x86asm
+n in %rdi
+fact_while:
+    movl    $1, %eax
+    jmp     .L5
+.L6:
+    imulq   %rdi, %rax
+    subq    $1, %rdi
+.L5:
+    cmpq    $1, %rdi
+    jg      .L6
+    rep; ret
+
+
+// 2. guarded-do
+    if (!test-expr)
+        goto done;
+loop:
+    body-statement
+    if (test-expr)
+        goto loop;
+done:
+// loop: 和 done: 之间的语句相当于 do-while 循环
+
+// 以上示例会变成：
+
+// x86asm-like c
+long fact_while_gd_goto(long n) {
+    long res = 1;
+    if (n <= 1)
+        goto done;
+loop:
+    res *= n;
+    n -= 1;
+    if (n != 1)    // 条件被优化成 !=
+        goto loop;
+done:
+    return res;
+}
+
+// x86asm
+n in %rdi
+fact_while:
+    cmpq    $1, %rdi
+    jle     .L7
+    movl    $1, %eax
+.L6:
+    imulq   %rdi, %rax
+    subq    $1, %rdi
+    cmpq    $1, %rdi
+    jne     .L6
+    rep; ret
+.L7:
+    movl    $1, %eax
+    ret
+```
+
+gcc 采取 jump to middle 策略还是 guarded-do 策略取决于优化等级。
+
+#### `for`
+
+```c
+for (init-expr; test-expr; update-expr)
+    body-statement
+// 相当于
+init-expr;
+while (test-expr) {
+    body-statement
+    update-expr;
+}
+```
+
+gcc 为 `for` 循环生成的代码是 `while` 循环的两种翻译之一，这取决于优化等级。因此 `for` 循环对应的 x86asm-like c 代码为：
+
+```c
+// jump to middle
+    init-expr;
+    goto test;
+loop:
+    body-statement
+    update-expr;
+test:
+    if (test-expr)
+        goto loop;
+
+// guarded-do
+    init-expr;
+    if (!test-expr)
+        goto done;
+loop:
+    body-statement
+    update-expr;
+    if (test-expr)
+        goto loop;
+done:
+```
+
+示例：阶乘函数
+
+```c
+long fact_for(long n) {
+    long res = 1;
+    for (long i = 2; i <= n; i++)
+        res *= i;
+    return res;
+}
+
+// x86asm-like c
+long fact_for_while(long n) {
+    long res = 1;
+    long i = 2;
+    while (i <= n) {
+        res *= i;
+        i++;
+    }
+    return res;
+
+// jump to middle
+long fact_for_jm_goto(long n) {
+    long res = 1;
+    long i = 2;
+    goto test;
+loop:
+    res *= i;
+    i++;
+test:
+    if (i <= n)
+        goto loop;
+    return res;
+}
+
+// x86-64 jump to middle
+n in %rdi
+fact_for:
+    movl    $1, %eax
+    movl    $2, %edx
+    jmp     .L8
+.L9:
+    imulq   %rdx, %rax
+    addq    $1, %rdx
+.L8:
+    cmpq    %rdi, %rdx
+    jle     .L9
+    rep; ret
+
+// guarded-do
+long fact_for_gd_goto(long n) {
+    long res = 1;
+    long i = 2;
+    if (i > n)
+        goto done;
+loop:
+    res *= i;
+    i++;
+    if (i <= n)
+        goto loop;
+done:
+    return res;
+}
+
+// x86-64 guarded-do
+n in %rdi
+fact_for:
+    movl    $1, %eax    ; res = 1
+    movl    $2, %edx    ; i = 2
+    cmpq    %rdi, %rdx
+    jg      .L11        ; if (i > n) goto done
+.L10:
+    imulq   %rdx, %rax  ; res *= i
+    addq    $1, %rdx    ; i++
+    cmpq    %rdi, %rdx
+    jle     .L10        ; if (i <= n) goto loop
+.L11:
+    rep; ret            ; return res
+```
+
+### `switch`
+
+跳转表（jump table）是一个数组，表项 `i` 是*开关索引值为 `i` 时对应的*代码段的地址。和使用一大堆 `if-else` 语句相比，跳转表的优点是执行 `switch` 语句的用时与开关情况数量无关。
+
+```c
+// c 中的一个 switch 语句
+void switch_eg(long x, long n, long* dest) {
+    long val = x;
+    switch (n) {
+        case 100:
+            val *= 13;
+            break;
+        case 102:
+            val += 100; /* Fall through */
+        case 103:
+            val += 11;
+            break;
+        case 104:
+        case 106:
+            val *= val;
+            break;
+        default:
+            val = 0;
+    }
+    *dest = val;
+}
+
+// x86asm-like c
+void switch_eg_impl(long x, long n, long* dest) {
+    static void* jt[7] = {
+        &&loc_A, &&loc_def, &&loc_B, &&loc_C,
+        &&loc_D, &&loc_def, &&loc_D
+    };    // gcc 跳转表
+
+    unsigned long index = n - 100;
+    long val;
+
+    if (index > 6)
+        goto loc_def;
+    // multiway branch
+    goto *jt[index];
+
+    loac_A:
+        val = x * 13;
+        goto done;
+    loc_B:
+        x += 10;
+        /* Fall through */
+    loc_C:
+        val = x + 11;
+        goto done;
+    loc_D:
+        val = x * x;
+        goto done;
+    loc_def:
+        val = 0;
+    done:
+        *dest = val;
+}
+
+// x86-64
+x in %rdi, n in %rsi, dest in %rdx
+switch_eg:
+    subq    $100, %rsi
+    cmpq    $6, %rsi
+    ja      .L8
+    jmp     *.L4(,%rsi,8)  ; 8 表示每个表项占 8 字节
+.L3:
+    leaq    (%rdi,%rdi,2), %rax
+    leaq    (%rdi,%rax,4), %rdi
+    jmp     .L2
+.L5:
+    addq    $10, %rdi
+.L6:
+    addq    $11, %rdi
+    jmp     .L2
+.L7:
+    imulq   %rdi, %rdi
+    jmp     .L2
+.L8:
+    movl    $0, %edi
+.L2:
+    movq    %rdi, (%rdx)
+    ret
+
+; 跳转表
+    .section    .rodata    ; read-only data
+    .align 8       ; 8 字节对齐地址
+.L4:
+    .quad   .L3    ; case 100: loc_A
+    .quad   .L8    ; case 101: loc_def
+    .quad   .L5    ; case 102: loc_B 
+    .quad   .L6    ; case 103: loc_C
+    .quad   .L7    ; case 104: loc_D
+    .quad   .L8    ; case 105: loc_def
+    .quad   .L7    ; case 106: loc_D
+```
+
+## 过程
+
+过程 P 调用过程 Q，Q 执行后返回到 P。这些动作包括以下机制：
+- 传递控制：进入 Q 时，PC 被更新为 Q 代码的起始地址。返回时，PC 被更新为调用 Q 指令的下一条指令的地址。
+- 传递数据：参数和返回值的传递。
+- 分配和释放内存：Q 局部变量的分配和释放。
+
+![通用的栈帧结构](images/通用的栈帧结构.png)
+
+通过减小和增加栈指针的值，我们可以在栈上分配和释放内存。
+
+当 x86-64 过程所需的存储空间超出寄存器能够存放的大小时，就会在栈上分配空间。这一部分就是过程的**栈帧（stack frame）**。
+
+P 调用 Q 时，P 的返回地址被压入栈中，指明 Q 返回时应该继续执行 P 的哪条指令。Q 的代码会扩展当前栈，保存寄存器的值、分配局部变量的空间、为它调用的过程设置参数。多数过程的栈帧是**定长**的，在过程的开始被分配完毕。通过寄存器，P 可以传递最多 6 个整数值，但若 Q 需要更多的参数，P 可以在调用 Q 之前在自己的栈帧里存储好这些参数。
+
+为提高时空效率，x86-64 过程只分配需要的栈帧。例如，参数若少于或等于 6 个，那么就会用寄存器传递所有的参数。有的函数的所有变量都可以保存在寄存器，且不会调用任何其他函数，完全不需要栈帧。
+
+### 转移控制
+
+| 指令 | 描述 |
+| --- | --- |
+| `call Label` | 直接过程调用 |
+| `call *Operand` | 间接过程调用 |
+| `ret` | 返回 |
+（它们和 `callq` `retq` 完全等价）
+
+`call Q` 会把返回地址（`call Q` 的下一条指令的地址）压入栈中，并把 PC 设置为 Q 的起始地址。
+`ret` 会从栈中弹出返回地址，并把 PC 设置为该地址。
+
+
+### 数据传送
+
+![传递函数参数的寄存器](images/传递函数参数的寄存器.png)
+
+如果函数有大于 6 个整数参数，那么**超出部分**就需要通过栈传递。第 7 个参数位于栈顶。**通过栈传递参数时，所有数据大小向 8 的倍数对齐**。参数到位后，即可执行 `call` 指令转移控制。
+
+### 栈上的局部存储
+
+局部数据必须存放在内存中的时候：
+- 寄存器不够用
+- 对局部变量使用了 `&` 取地址
+- 局部变量是数组或结构
+
+取地址：
+
+```c
+long swap_add(long* xp, long* yp) {
+    long x = *xp;
+    long y = *yp;
+    *xp = y;
+    *yp = x;
+    return x + y;
+}
+
+long caller() {
+    long arg1 = 534;
+    long arg2 = 1057;
+    long sum = swap_add(&arg1, &arg2);
+    long diff = arg1 - arg2;
+    return sum * diff;    
+}
+
+// x86-64
+long caller()
+caller:
+    subq    $16, %rsp       ; 分配 16 字节栈帧
+    movq    $534, (%rsp)    ; arg1
+    movq    $1057, 8(%rsp)  ; arg2
+    leaq    8(%rsp), %rsi   ; &arg2
+    movq    %rsp, %rdi      ; &arg1
+    call    swap_add
+    movq    (%rsp), %rdx    ; arg1
+    subq    8(%rsp), %rdx   ; diff = arg1 - arg2
+    imulq   %rdx, %rax      ; sum *= diff
+    addq    $16, %rsp       ; 释放栈帧
+    ret
+```
+
+寄存器不够用（8 个参数）：
+
+```c
+long call_proc() {
+    long x1 = 1; 
+    int x2 = 2;
+    short x3 = 3;
+    char x4 = 4;
+    proc(x1, &x1, x2, &x2, x3, &x3, x4, &x4);
+    return (x1 + x2) * (x3 - x4);
+}
+
+// x86-64
+long call_proc()
+call_proc:
+    ; 准备参数
+    subq    $32, %rsp
+    movq    $1, 24(%rsp)    ; store 1 in &x1
+    movl    $2, 20(%rsp)    ; store 2 in &x2
+    movw    $3, 18(%rsp)    ; store 3 in &x3
+    movb    $4, 17(%rsp)    ; store 4 in &x4
+
+    leaq    17(%rsp), %rax  ; create &x4
+    movq    %rax, 8(%rsp)   ; store &x4 as arg8
+    movl    $4, (%rsp)      ; store 4 as arg7
+    leaq    18(%rsp), %r9   ; pass &x3 as arg6
+    movl    $3, %r8d        ; pass 3 as arg5
+    leaq    20(%rsp), %rcx  ; pass &x2 as arg4
+    movl    $2, %edx        ; pass 2 as arg3
+    leaq    24(%rsp), %rsi  ; pass &x1 as arg2
+    movl    $1, %edi        ; pass 1 as arg1
+
+    call    proc
+
+    ; 恢复内存
+    movslq  20(%rsp), %rdx  ; long(x2)
+    addq    24(%rsp), %rdx  ; x1 + x2
+    movswl  18(%rsp), %eax  ; int(x3)
+    movsbl  17(%rsp), %ecx  ; int(x4)
+    subl    %ecx, %eax      ; x3 - x4
+    cltq                    ; long(x3 - x4)
+    imulq   %rdx, %rax      ; (x1 + x2) * (x3 - x4)
+    addq    $32, %rsp       ; 释放栈帧
+    ret
+```
+
+
+### 寄存器中的局部存储空间
 
