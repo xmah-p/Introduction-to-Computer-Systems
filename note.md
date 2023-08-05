@@ -1144,3 +1144,636 @@ call_proc:
 
 ### 寄存器中的局部存储空间
 
+给定时刻只有一个过程是活动的，我们需要确保当调用者调用被调用者时，被调用者不会覆盖调用者稍后会使用的寄存器值。
+
+根据惯例，寄存器 `%rbx`、`%rbp`、`%r12`、`%r13`、`%r14`、`%r15` 是**被调用者保存寄存器**。P 调用 Q 时，Q 必须保存这些寄存器的值，保证它们的值在返回后与调用前一样，即 Q 要么不改变这些寄存器的值，要么把他们的原始值压入栈中，然后在返回前恢复。依据此惯例，P 就可以安全地把值存在被调用者保存寄存器中。
+
+所有其他寄存器，除了栈指针 `%rsp`，都是**调用者保存寄存器**。调用后，这些寄存器的值可能会被修改。
+
+```c
+long P(long x, long y) {
+    long u = Q(y);
+    long v = Q(x);
+    return u + v;
+}
+
+// x86-64
+x in rdi, y in rsi
+P:
+    pushq    %rbp
+    pushq    %rbx
+    subq     $8, %rsp
+    movq     %rdi, %rbp    ; save x
+    movq     %rsi, %rdi    ; y as arg1
+    call     Q
+    movq     %rax, %rbx    ; save return value
+    movq     %rbp, %rdi    ; x as arg1
+    call     Q
+    addq     %rbx, %rax    ; return value = u + v
+    addq     $8, %rsp
+    popq     %rbx
+    popq     %rbp
+    ret
+```
+
+### 递归过程
+
+```c
+long rfact(long n) {
+    long res;
+    if (n <= 1)
+        res = 1;
+    else
+        res = n * rfact(n - 1);
+    return res;
+}
+
+// x86-64
+n in %rdi
+rfact:
+    pushq   %rbx
+    movq    %rdi, %rbx
+    movl    $1, %eax
+    cmpq    $1, %rdi
+    jle     .L35
+    leaq    -1(%rdi), %rdi
+    call    rfact
+    imulq   %rbx, %rax
+.L35:
+    popq    %rbx
+    ret
+```
+
+## 数组分配和访问
+
+x86-64 的内存引用指令可以简化数组访问。例如：
+
+```c
+int E[5];     // E in %rdx
+int i = 2;    // i in %rcx
+E[i];         // (%rdx, %rcx, 4)
+```
+
+C 允许指针运算。`ptr + 1` 相当于 `&(ptr[1])`， `ptr0 - ptr1` 结果的类型为 `long`。
+
+```c
+int a[5][3];         // a in %rdi
+int i = 2, j = 1;    // i in %rsi, j in %rdx
+a[i][j];             // a + 4 * (3 * i + j)
+
+// leaq    (%rsi, %rsi, 2), %rax    ; 3 * i
+// leaq    (%rdi, %rax, 4), %rax    ; a + 4 * (3 * i)
+// movl    (%rax, %rdx, 4), %eax    ; a + 12 * i + 4 * j
+```
+
+编译器对定长数组常常有优化。
+
+```c
+#define N = 16;
+typedef int fix_mat[N][N];
+
+int fix_prod_ele (fix_mat A, fix_mat B, long i, long k) {
+    long j;
+    int res = 0;
+    for (j = 0; j < N; j++) {
+        res += A[i][j] * B[j][k];
+    }
+    return res;
+}
+
+int fix_prod_ele_opt(fix_mat A, fix_mat B, long i, long k) {
+    int* Aptr = &A[i][0];
+    int* Bptr = &B[0][k];
+    int* Bend = &B[N][k];
+    int res = 0;
+    do {
+        res += *Aptr * *Bptr;
+        Aptr++;
+        Bptr += N;
+    } while (Bptr != Bend);
+    return res;
+}  // 去掉了整数索引 j，把数组引用全部变成了指针间接引用
+
+// x86-64
+A in %rdi, B in %rsi, i in %rdx, k in %rcx
+fix_prod_ele:
+    salq    $6, %rdx                  ; i * 64
+    addq    %rdx, %rdi                ; Aptr = A + i * 64 = &A[i][0]
+    leaq    (%rsi, %rcx, 4), %rcx     ; Bptr = B + k * 4 = &B[0][k]
+    leaq    1024(%rcx), %rsi          ; Bend = B + k * 4 + 1024 = &B[N][k]
+    movl    $0, %eax                  ; res = 0
+.L7:
+    movl    (%rdi), %edx              ; *Aptr
+    imull   (%rcx), %edx              ; *Aptr * *Bptr
+    addl    %edx, %eax                ; res += *Aptr * *Bptr
+    addq    $4, %rdi                  ; Aptr++
+    addq    $64, %rcx                 ; Bptr += N
+    cmpq    %rsi, %rcx                
+    jne     .L7                       ; Bptr != Bend
+    rep; ret
+```
+
+C99 引入了变长数组。
+
+```c
+int var_ele(long n, int A[n][n], long i, long j) {
+    return A[i][j];
+}
+
+// x86-64
+n in %rdi, A in %rsi, i in %rdx, j in %rcx
+var_ele:
+    imulq   %rdx, %rdi                ; i * n
+    leaq    (%rsi, %rdi, 4), %rax     ; A + 4 * (i * n)
+    movl    (%rax, %rcx, 4), %eax     ; A[i][j]
+    ret
+``` 
+
+由于必须使用乘法指令将 `i` 伸缩 `n` 倍，因此变长数组的性能可能一般。
+
+不过，在循环中引用变长数组时，编译器往往可以根据访问模式的规律来优化索引的计算（即可以把数组引用优化成指针间接引用，从而**避免直接数组引用导致的乘法**）。
+
+
+## 结构体和联合
+
+编译器维护关于结构体的信息，结构体的所有组成部分存放在一段连续的内存里。
+
+联合体用不同的字段引用相同的内存块。联合体所有字段的偏移量都是 0，它们重叠地放在同一块内存中。联合体的总大小等于它最大字段的大小。
+
+某种二叉树每个叶子节点都存放一个 `double[2]`；每个内部节点存放两个指向孩子节点的指针，但不存放数据。即数据字段和指针字段的使用是**互斥**的。那么就可以用联合体定义：
+
+```c
+typedef enum { N_LEAF, N_INTERNAL } nodetype_t;
+
+struct node_s {
+    nodetype_t type;    // tag
+    union {
+        struct {
+            union node_s* left;
+            union node_s* right;
+        } internal;
+        double data[2];
+    } info;
+};
+```
+
+联合体还可以用来**访问不同数据类型的位模式**。
+
+```c
+unsigned long double2bits(double d) {
+    union {
+        double d;
+        unsigned long bits;
+    } u;
+    u.d = d;
+    return u.bits;
+}
+
+// 如果使用 union 实现数据的拼接，那么就需要注意大端法和小端法的问题
+```
+
+**数据对齐**：一些计算机系统对基本数据类型的合法地址做出了限制，要求某种类型对象的地址必须是某个 `K` 的倍数。
+
+无论数据是否对齐，x86-64 硬件都能正确工作。
+
+对齐原则：**`K` 字节的基本对象的地址必须是 `K` 的倍数**。
+
+汇编中，`.align 8` 可以保证其后面的数据的起始地址是 8 的倍数。
+
+```c
+struct S1 {
+    int i;
+    char c;
+    int j;
+};
+// 编译器会在 i 和 c 之间填充 3 个字节，从而保证 j 满足 4 字节对齐
+// 整个结构体的大小就会变成 12 字节
+struct S1* p;    // p 的值必须 4 字节对齐 从而保证 p->i p->c p->j 是对齐的
+```
+
+```c
+struct S2 {
+    int i;
+    int j;
+    char c;
+}; 
+// 编译器会在 c 之后填充 3 个字节，以保证 S2 的数组的元素是数据对齐的
+```
+
+- `struct P1 { int i; char c; int j; char d; };`：4 + 4 + 4 + 4 = 16 字节，结构体自身 4 字节对齐
+- `struct P2 { short w[3]; char c[3]; };`：6 + 3 + 1 = 110 字节，结构体自身 2 字节对齐
+- `struct P3 { short w[5]; char* c[3]; };`：10 + 6 + 24 = 40 字节，结构体自身 8 字节对齐
+
+```c
+struct {
+    char* a;
+    short b;
+    double c;
+    char d;
+    float e;
+    char f;
+    long g;
+    int h;
+} rec; // 8 + 2+6 + 8 + 1+3 + 4 + 1+7 + 8 + 4+4 = 56 字节
+
+// 重排字段顺序为 a c g e h b d f，则总大小变成 8 + 8 + 8 + 4 + 4 + 2 + 1 + 1+4 = 40 字节
+// （字段按大小递减放置 结尾补 4 字节）
+```
+
+## 将控制与数据结合起来
+
+C 对数组引用不进行任何边界检查，且局部变量和状态信息（例如保存的寄存器值和返回地址）都存放在栈中。对越界的数组元素的写操作会破坏存储在栈中的状态信息，从而导致程序出错。
+
+**缓冲区溢出（buffer overflow）**是一种常见的状态破坏。
+
+```c
+// 标准库 gets 的实现
+char* gets(char* s) {
+    int c;
+    char* dest = s;
+    while ((c = getchar()) != '\n' && c != EOF) {
+        *dest++ = c;
+    }
+    if (c == EOF && dest == s) {
+        return NULL;
+    }
+    *dest++ = '\0';
+    return s;
+} // 不会检查输入的长度是否会越界访问 s
+
+void echo() {
+    char buf[8];
+    gets(buf);
+    puts(buf);
+} 
+
+// x86-64
+echo:
+    subq    $24, %rsp    // 在栈上分配 24 字节
+    movq    %rsp, %rdi   // buf 存放在栈中
+    call    gets         // 越界超过 24 字节 就会覆盖返回地址 甚至破坏 caller 的栈帧
+    movq    %rsp, %rdi
+    call    puts
+    addq    $24, %rsp
+    ret
+```
+
+`gets` `strcpy` `strcat` `sprintf` 等库函数都可能导致缓冲区溢出漏洞。
+
+### 栈随机化
+
+**栈随机化**：攻击者需要在字符串中插入攻击代码和执行攻击代码的指针。而产生这个指针需要知道这个字符串放置的栈地址。栈随机化使得**栈的位置在程序每次运行时都有变化**。实现方法是**程序开始时，在栈上分配一段 0 ~ n 字节内随机大小的空间**。
+
+Linux 中，栈随机化是标准行为，它是更大的技术**地址空间布局随机化（Address-Space Layout Randomization）**的一部分。采用 ASLR，每次运行时程序的不同部分（程序代码、库代码、栈、全局变量、堆数据）都会被加载到内存的不同区域。
+
+栈随机化以及其他 ASLR 技术保证了同样的程序运行在不同机器上，地址映射会大相径庭，从而预防了一些攻击。
+
+然而攻击者可以反复用不同的地址攻击。比如在实际攻击代码之前插入很长一段 `nop` 指令（只递增程序计数器的指令），只要攻击者能够猜中这段序列的某个地址，攻击代码就能被执行。即，**空操作雪橇（nop sled）**。如果建立 $256$ 字节的 nop sled，就能通过最多 $2^15 = 32768$ 次枚举破解 $n=2^23$ 的随机化；不过，对 64 位的情况，难度就有点大了。栈随机化和其他 ASLR 技术增加攻击的难度，大大降低了病毒和蠕虫的传播速度。
+
+
+### 栈破坏检测
+
+gcc 提供了**栈保护者（stack protector）**机制来检测缓冲区越界。它在栈帧中任何局部缓冲区和栈状态之间存储一个**金丝雀值（canary value） / 哨兵值（guard value）**。金丝雀值在程序每次运行时随机产生，在恢复寄存器状态和从函数返回之前，程序检查金丝雀值是否被修改，如果是，则程序异常中止。
+
+gcc 会试着确定函数是否容易被栈溢出攻击（有无局部 `char` 缓冲区），自动插入这种一处检测，除非启用 `-fno-stack-protector` 选项。
+
+```c
+void echo() {
+    char buf[8];
+    gets(buf);
+    puts(buf);
+} 
+
+// x86-64 with stack protector
+echo:
+    subq    $24, %rsp
+    movq    %fs:40, %rax    // retrieve canary
+    movq    %rax, 8(%rsp)   // store canary on stack
+    xorl    %eax, %eax      // zero out %eax
+    movq    %rsp, %rdi
+    call    gets
+    movq    %rsp, %rdi
+    call    puts
+    movq    8(%rsp), %rax   // retrieve canary
+    xorq    %fs:40, %rax    // check canary
+    je      .L9             // if = goto ok
+    call    __stack_chk_fail
+.L9:
+    addq    $24, %rsp
+    ret
+```
+
+`%fs:40` 指明金丝雀值是用**段寻址（segmented addressing）**从内存中读入的。金丝雀值被存放在一个特殊的**只读**段中，不会被攻击者覆盖。在**恢复寄存器状态和函数返回之前**，程序会检查金丝雀值是否被修改，如果是，则调用一个错误处理例程。
+
+
+### 限制可执行代码区域
+
+典型程序中，只有保存编译器产生的代码的内存才需要是可执行的，其他部分可以被限制为只允许读和写。以前的 x86 体系结构将读和执行访问控制合并成一个 1 位的标志，即可读的页也是可执行的。栈必须可读且可写，因而是可执行的。虽然有能够限制一些页可读但不可执行的机制，但性能较差。
+
+最近的处理器引入了 **NX（No-Execute）**位，将读和执行访问模式分开，栈可以被标记被可读、可写但不可执行的，性能上也没有损失。
+
+
+### 变长栈帧
+
+当函数调用 `alloca` 或声明局部变长数组时，我们会需要实现变长栈帧。
+
+```c
+long vframe(long n, long idx, long* q) {
+    long i;
+    long* p[n];
+    p[0] = &i;
+    for (i = 1; i < n; i++) {
+        p[i] = q;
+    }
+    return *p[idx];
+}
+
+// x86-64
+n in rdi, idx in rsi, q in rdx
+vframe:
+    pushq   %rbp
+    movq    %rsp, %rbp            // set frame ptr
+    subq    $16, %rsp
+    leaq    22(, %rdi, 8), %rax
+    andq    $-16, %rax            // round to nearest lower 16
+    subq    %rax, %rsp            // allocate for p
+    leaq    7(%rsp), %rax
+    shrq    $3, %rax              
+    leaq    0(, %rax, 8), %r8     // round to nearest higher 8
+    movq    %r8, %rcx
+
+// Code for initializing p
+i in rax and on stack, n in rdi, p in rcx, q in rdx
+.L3:
+    movq    %rdx, (%rcx, %rax, 8)          // p[i] = q
+    addq    $1, %rax
+    movq    %rax, -8(%rbp)                  // store on stack
+.L2:
+    movq    -8(%rbp), %rax                  // load i
+    cmpq    %rdi, %rax
+    jl      .L3
+
+// Code for function exit
+    leave
+    ret
+```
+
+![](./images/vframe栈帧.png)
+
+`s1` 是第一次执行 `subq` 后 `%rsp` 指向的位置，`s2` 是第二次执行 `subq` 后 `%rsp` 指向的位置。`e1` 和 `e2` 是空置的。
+
+寄存器 `%rbq` 作为**帧指针（frame pointer）**或**基指针（base pointer）**管理变长栈帧。`%rbq` 是**被调用者保存寄存器**，代码先将 `%rbq` 的值保存在栈中，然后在函数的整个执行过程中不再改变 `%rbq` 的值。用固定长度的局部变量（例如 `i`）相对于 `%rbq` 的偏移量来访问它们。
+
+`leave` 指令将帧指针恢复到原始值，释放整个栈帧。它相当于 `movq %rbp, %rsp; popq %rbp`。
+
+注意第一部分代码的数据对齐。`s2 - s1` 被**向下舍入到最近的 16 的倍数**，而 **`p` 的起始地址被向上舍入到最近的 8 的倍数**。
+
+
+## 浮点
+
+处理器的浮点体系结构包括：
+- 浮点的存储和访问（寄存器）。
+- 浮点操作指令
+- 向函数传递浮点参数，从函数返回浮点数
+- 函数调用时保存寄存器的规则
+
+Pentium / MMX 时代，Intel 和 AMD 引入了媒体（media）指令，支持图形图像处理。这些指令本意是允许对多个不同的数据并行执行同一个操作，称为**单指令多数据（SIMD）**。MMX 发展成 SSE（Streaming SIMD Extension），又发展为最新的 AVX（Advanced Vector Extension）。
+
+MMX 中，寄存器被称为“MM”寄存器，SSE 中被称为“XMM”寄存器，AVX 中被称为“YMM”寄存器。它们分别是 64 位、128 位和 256 位的。
+
+2000 年 Pentium 4 引入了 SSE2，媒体指令开始包括对标量浮点数操作的指令。这些指令使用 XMM 或 YMM 寄存器的低 32 位或 64 位的单个值。x86-64 浮点数是基于 SSE 或 AVX 的。我们基于 AVX2 讨论浮点数（gcc 给定编译选项 `-mavx2`）。
+
+AVX 浮点体系结构允许数据存储在 16 个 YMM 寄存器中，每个 YMM 寄存器都是 **256 位**的。当对标量数据操作时，这些寄存器只保存浮点数，只使用低 32 位或低 64 位，汇编代码用寄存器的 SSE XMM 寄存器名字引用它们，它们是对应 YMM 寄存器的**低 128 位**。
+
+| 媒体寄存器（YMM） | 媒体寄存器（XMM） | 用途 |
+| :---: | :---: | :---: |
+| %ymm0 | %xmm0 | 1st FP arg. 返回值 |
+| %ymm1 | %xmm1 | 2nd FP 参数 |
+| %ymm2 | %xmm2 | 3rd FP 参数 |
+| %ymm3 | %xmm3 | 4th FP 参数 |
+| %ymm4 | %xmm4 | 5th FP 参数 |
+| %ymm5 | %xmm5 | 6th FP 参数 |
+| %ymm6 | %xmm6 | 7th FP 参数 |
+| %ymm7 | %xmm7 | 8th FP 参数 |
+| %ymm8 | %xmm8 | 调用者保存 |
+| %ymm9 | %xmm9 | 调用者保存 |
+| %ymm10 | %xmm10 | 调用者保存 |
+| %ymm11 | %xmm11 | 调用者保存 |
+| %ymm12 | %xmm12 | 调用者保存 |
+| %ymm13 | %xmm13 | 调用者保存 |
+| %ymm14 | %xmm14 | 调用者保存 |
+| %ymm15 | %xmm15 | 调用者保存 |
+
+### 浮点传送和转换
+
+| 指令 | 源 | 目的 | 描述 |
+| :---: | :---: | :---: | :---: |
+| `vmovss` | $M_{32}$ | $X$ | 单精度数 |
+| `vmovss` | $X$ | $M_{32}$ | 单精度数 |
+| `vmovsd` | $M_{64}$ | $X$ | 双精度数 |
+| `vmovsd` | $X$ | $M_{64}$ | 双精度数 |
+| `vmovaps` | $X$ | $Y$ | 对齐的封装好的单精度数 |
+| `vmovapd` | $X$ | $X$ | 对齐的封装好的双精度数 |
+
+上表给出了 **XMM 寄存器和内存之间**以及 **XMM 寄存器之间不做任何转换地**传送浮点的指令。引用内存的指令是**标量**指令，它们只对单个（而不是一组封装好的数据）进行操作。无论数据对其与否，指令都能正常执行，但建议 32 位数据 4 字节对齐，64 位数据 8 字节对齐。
+
+`vmovaps` 和 `vmovapd` 指令中的 `a` 意为 aligned，`d` 意为 packed。读写内存时，如果地址不满足 **16 字节对齐**，则它们会引发异常。在寄存器之间传送数据不会出现错误对齐。
+
+| 指令 | 源 | 目的 | 描述 |
+| :---: | :---: | :---: | :---: |
+| `vcvttss2si` | $X/M_{32}$ | $R_{32}$ | 单精度数 -> 整数（截断） |
+| `vcvttsd2si` | $X/M_{64}$ | $R_{32}$ | 双精度数 -> 整数（截断） |
+| `vcvttss2siq` | $X/M_{32}$ | $R_{64}$ | 单精度数 -> 四字整数（截断） |
+| `vcvttsd2siq` | $X/M_{64}$ | $R_{64}$ | 双精度数 -> 四字整数（截断） |
+
+上表的指令**把 XMM 寄存器或内存中读出的浮点数转换成整数，并把结果写入通用寄存器**。
+
+| 指令 | 源 1 | 源 2 | 目的 | 描述 |
+| :---: | :---: | :---: | :---: | :---: |
+| `vcvtsi2ss` | $M_{32}/R_{32}$ | $X$ | $X$ | 整数 -> 单精度数 | 
+| `vcvtsi2sd` | $M_{32}/R_{32}$ | $X$ | $X$ | 整数 -> 双精度数 |
+| `vcvtsi2ssq` | $M_{64}/R_{64}$ | $X$ | $X$ | 四字整数 -> 单精度数 |
+| `vcvtsi2sdq` | $M_{64}/R_{64}$ | $X$ | $X$ | 四字整数 -> 双精度数 |
+
+上表的指令第一个操作数从**内存或通用寄存器**读取，第二个操作数从**XMM 寄存器**读取，结果写入 **XMM 寄存器**。第二个操作数只会影响结果的高位字节。常见的使用场景中，第二个操作数和目的操作数是同一个寄存器。
+
+| 指令 | 源 1 | 源 2 | 目的 | 描述 |
+| :---: | :---: | :---: | :---: | :---: |
+| `vcvtss2sd` | $M_{32}/R_{32}$ | $X$ | $X$ | 单精度数 -> 双精度数 | 
+| `vcvtsd2ss` | $M_{32}/R_{32}$ | $X$ | $X$ | 双精度数 -> 单精度数 |
+
+假如 `%xmm0` 的低位 4 字节保存着一个单精度值，那么 `vcvtss2sd %xmm0, %xmm0, %xmm0` 就能把它转换为双精度值。然而 gcc 会生成：
+
+```x86asm
+vunpcklps %xmm0, %xmm0, %xmm0    ; unpack and interleave low packed single
+vcvtps2pd %xmm0, %xmm0
+```
+
+`vunpcklps` 指令可以**交叉放置**两个源 XMM 寄存器的值，结果存储在目标寄存器中。如果第一个源寄存器的内容为字 $[s_3, s_2, s_1, s_0]$，第二个源寄存器的内容为字 $[t_3, t_2, t_1, t_0]$，那么 `vunpcklps` 的结果为 $[s_1, t_1, s_0, t_0]$。`vcvtps2pd` 指令把源 XMM 寄存器中的**两个低位单精度值扩展成目的 XMM 寄存器中的两个双精度值**。对 $[s_1, t_1, s_0, t_0]$ 应用此指令会得到 $[\operatorname{ds}_0, \operatorname{dt}_0]$。gcc 生成的代码更麻烦也更莫名其妙。
+
+对于单精度到双精度的转换，相比于 `vcvtsd2ss`，gcc 会生成类似的代码：
+
+```x86asm
+vmovddup    %xmm0, %xmm0
+vcvtpd2psx  %xmm0, %xmm0
+```
+
+假如 `%xmm0` 保存着两个双精度值 $[x_1, x_0]$，那么 `vmovddup` 会将其设置为 $[x_0, x_0]$，`vcvtpd2psx` 将它们转换成单精度，再**存放在寄存器的低位一半中，并将高位一半清零**。这同样是麻烦而莫名其妙的代码。
+
+| 指令 1 | 指令 2 | 描述 |
+| :---: | :---: | :---: |
+| `vunpcklps %xmm0, %xmm0, %xmm0` | `vcvtps2pd %xmm0, %xmm0` | 单精度数 -> 双精度数 |
+| `vmovddup %xmm0, %xmm0` | `vcvtpd2psx %xmm0, %xmm0` | 双精度数 -> 单精度数 |
+
+```c
+double fcvt(int i, float* fp, double* dp, long* lp)
+{
+    float f = *fp;
+    double d = *dp;
+    long l = *lp;
+    *lp = (long)d;
+    *fp = (float)i;
+    *dp = (double)l;
+    return (double)f;
+}
+
+// x86-64
+i in edi, fp in rsi, dp in rdx, lp in rcx
+fcvt:
+    vmovss      (%rsi), %xmm0    // f = *fp
+    movq        (%rcx), %rax     // l = *lp
+    vcvttsd2siq (%rdx), %r8      // d = (long)*dp
+    movq        %r8, (%rcx)      // *lp = d
+    vcvtsi2ss   %edi, %xmm1, %xmm1  // (float)i
+    vmovss      %xmm1, (%rsi)    // *fp = (float)i
+    vcvtsi2sdq  %rax, %xmm1, %xmm1  // (double)l 
+    vmovsd      %xmm1, (%rdx)    // *dp = (double)l
+    vunpcklps   %xmm0, %xmm0, %xmm0
+    vcvtps2pd   %xmm0, %xmm0     // (double)f
+    ret
+```
+
+
+### 过程中的浮点代码
+
+**XMM 寄存器**用来向函数传递浮点参数和从函数返回浮点值。
+- `%xmm0` ~ `xmm7` 最多可以传递 8 个浮点参数，多余的参数用栈传递。
+- `%xmm0` 用来返回浮点值。
+- **所有的 XMM 寄存器都是调用者保存的**，被调用者可以随意覆盖它们。
+
+浮点参数的寄存器分配按 `%xmm0` -> `%xmm7` 的顺序；其他参数按 `%rdi` `%rsi` `%rdx` `%rcx` `%r8` `%r9` 的顺序分配。
+
+
+### 浮点运算操作
+
+| 单精度指令 | 双精度指令 | 描述 |
+| :---: | :---: | :---: |
+| `vaddss` | `vaddsd` | 加 |
+| `vsubss` | `vsubsd` | 减 |
+| `vmulss` | `vmulsd` | 乘 |
+| `vdivss` | `vdivsd` | 除 |
+| `vmaxss` | `vmaxsd` | 最大值 |
+| `vminss` | `vminsd` | 最小值 |
+| `sqrtss` | `sqrtsd` | 算术平方根 |
+
+这是一组执行算术运算的 AVX2 浮点指令，它们**有一个或两个源操作数和一个目标操作数**。**第一个源操作数可以是 XMM 寄存器或内存位置，第二个源操作数和目的操作数必须是 XMM 寄存器**。注意，`vdivss S1 S2 D` 计算的结果为 **`S2/S1`**。
+
+
+AVX 浮点操作**不能以立即数值作为操作数**，编译器必须为所有的常量值分配和初始化存储空间。
+
+```c
+double cel2fahr(double temp) {
+    return 1.8 * temp + 32.0;
+}
+
+// x86-64
+temp in %xmm0
+cel2fahr:
+    vmulsd    .LC2(%rip), %xmm0, %xmm0
+    vaddsd    .LC3(%rip), %xmm0, %xmm0
+    ret
+.LC2:
+    .long    3435973837     // low 4 bytes of 1.8
+    .long    1073532108     // high 4 bytes of 1.8
+.LC3:
+    .long    0               // low 4 bytes of 32.0
+    .long    1077936128      // high 4 bytes of 32.0
+```
+
+这里的 `.long` 声明的是 `32` 位常量，而不是 `64` 位常量。
+
+| 单精度位级操作 | 双精度位级操作 | 描述 |
+| :---: | :---: | :---: |
+| `vxorps S1 S2 D` | `vorpd S1 S2 D` | 异或 |
+| `vandps S1 S2 D` | `andpd S1 S2 D` | 与 |
+
+这些操作作用于封装好的数据，更新整个目的 XMM 寄存器。
+
+
+| 浮点比较指令 | 基于 | 描述 |
+| :---: | :---: | :---: |
+| `ucomiss S1, S2` | S2 - S1 | 比较单精度值 |
+| `ucomisd S1, S2` | S2 - S1 | 比较双精度值 |
+
+**S1 可以是 XMM 寄存器或内存位置，S2 必须是 XMM 寄存器**。
+
+浮点比较指令会设置三个条件码：
+- `ZF`：零标志位
+- `CF`：进位标志位
+- `PF`：奇偶标志位
+
+奇偶标志位：对于整数操作，如果**最近的一次算术 / 逻辑运算产生的值的最低位字节是偶校验的**（即此字节中有偶数个 1），那么 `PF` 就被设置为 `1`。对于浮点操作，如果**两个操作数中存在 NaN**，那么 `PF` 被设置为 `1`。根据惯例，C 中如果有参数为 NaN，那么比较操作的结果为 `false`。例如，`x` 为 NaN 时，`x == x` 得到 `0`。
+
+条件码的设置条件
+
+| 顺序 S2 : S1 | CF | ZF | PF |
+| :---: | :---: | :---: | :---: |
+| 无序 | 1 | 1 | 1 |
+| S2 < S1 | 1 | 0 | 0 |
+| S2 = S1 | 0 | 1 | 0 |
+| S2 > S1 | 0 | 0 | 0 |
+
+**无序**：如果两个操作数中至少有一个是 NaN，那么结果就是无序的。
+
+`jp`（jump on parity）：当 `PF` 为 `1` 时跳转。
+
+```c
+typedef enum { NEG, ZERO, POS, OTHER } range_t;
+
+range_t find_range(float x) {
+    int res;
+    if (x < 0)
+        res = NEG;
+    else if (x == 0)
+        res = ZERO;
+    else if (x > 0)
+        res = POS;
+    else
+        res = OTHER;
+    return res;
+}
+
+// x86-64
+x in %xmm0
+find_range:
+    vxorps    %xmm1, %xmm1, %xmm1
+    vucomiss  %xmm0, %xmm1
+    ja        .L5
+    vucomiss  %xmm1, %xmm0
+    jp        .L8
+    movl      $1, %eax
+    je        .L3
+.L8:
+    vucomiss  .LC0(%rip), %xmm0  // comp x : 0
+    setbe     %al                // res = NaN ? 1 : 0
+    movzbl    %al, %eax
+    addl      $2, %eax           // res += 2
+    ret
+.L5:
+    movl      $0, %eax
+.L3:
+    rep; ret
+```
+
+gcc 生成的汇编代码效率一般：比较了 `x` 和 `0.0` 三次，尽管一次比较即可得到结果；生成了两次浮点常数：一次用了 `vxorps`，另一次从内存中读出这个值。
+
