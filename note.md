@@ -1522,7 +1522,7 @@ i in rax and on stack, n in rdi, p in rcx, q in rdx
 
 `s1` 是第一次执行 `subq` 后 `%rsp` 指向的位置，`s2` 是第二次执行 `subq` 后 `%rsp` 指向的位置。`e1` 和 `e2` 是空置的。
 
-寄存器 `%rbq` 作为**帧指针（frame pointer）**或**基指针（base pointer）**管理变长栈帧。`%rbq` 是**被调用者保存寄存器**，代码先将 `%rbq` 的值保存在栈中，然后在函数的整个执行过程中不再改变 `%rbq` 的值。用固定长度的局部变量（例如 `i`）相对于 `%rbq` 的偏移量来访问它们。
+寄存器 `%rbq` 作为**帧指针（frame pointer）**或**基指针（base pointer）**管理变长栈帧。由于 `%rbq` 是**被调用者保存寄存器**，代码必须先将 `%rbq` 的值保存在栈中，然后执行 `mov %rsp, %rbp`。之后不再改变 `%rbp` 的值。用固定长度的局部变量（例如 `i`）相对于 `%rbq` 的偏移量来访问它们。
 
 `leave` 指令将帧指针恢复到原始值，释放整个栈帧。它相当于 `movq %rbp, %rsp; popq %rbp`。
 
