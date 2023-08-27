@@ -1933,7 +1933,7 @@ stack:
 以 `.` 开头的是汇编器伪指令（assembler directives），它们告诉汇编器调整地址，以便在那里产生代码或插入数据。`.pos` 告诉汇编器应从地址 `0x0` 处产生代码，这个地址是所有 Y86-64 程序的起点。
 
 
-> `pushq %rsp` 和 `popq %rsp` 存在歧义。x86-64 中，`pushq %rsp` 会**将 `%rsp` 的原始值压入栈**，而不是减去 `8` 之后的值；`popq %rsp` 会**将 `%rsp` 置为从栈中弹出的值**，而不是栈指针被增加后的值。
+> `pushq %rsp` 和 `popq %rsp` 存在歧义。x86-64 中，`pushq %rsp` 会**将 `%rsp` 的原始值压入栈**，而不是减去 `8` 之后的值；`popq %rsp` 会**将 `%rsp` 置为从栈中弹出的值**，而不是栈指针被增加后的值。即，这两个指令压入和弹出的都是**旧值**，这是由于处理器**从不回读**的特性。
 
 
 ## 逻辑设计和硬件控制语言 HCL
@@ -2099,4 +2099,202 @@ Y86-64 处理器用时钟寄存器保存程序计数器（PC）、条件代码�
 - **更新 PC（PC update）**：将 PC 置为下一条指令的地址。
 
 处理器无限循环。发生异常后停止：执行 `halt` 指令或非法指令，或读写非法地址。
+
+`OPq`、`rrmovq`、`irmovq` 在顺序实现的计算（它们都不会设置条件码）：
+
+![](images/OPq-rrmovq-irmovq在顺序实现的计算.png)
+
+作为例子，以下是 `subq %rdx, %rbx` 指令的处理过程。
+
+![](images/跟踪subq.png)
+
+`rmmovq` 和 `mrmovq` 用 ALU 来加 `valC` 和 `valB`（偏移量和基址寄存器），得到有效内存地址。
+
+![](images/mrmovq-rmmovq.png)
+
+`pushq` 在译码阶段将 `valB` 赋值为 `%rsp`；在执行阶段，用 ALU 将栈指针减 8，得到 `valE`；在访存阶段将 `valA` 写入 `valE` 指示的内存地址；在写回阶段将 `valE` 赋给 `%rsp`。**栈指针的更新（减 8）效果上是在内存操作完成后进行的，因此 `pushq %rsp` 会将 `%rsp` 的原始值压入栈**，而不是减 8 后的值。
+
+`popq` 在译码阶段**读两次栈指针**，这是为了让后面的流程和其他指令更相似，增强整体设计的一致性。**栈指针的更新效果上后于内存操作**，`popq %rsp` 会**将 `%rsp` 置为从栈中弹出的值**，而不是栈指针被增加后的值。
+
+![](images/push-pop.png)
+
+
+三类控制转移指令的处理类似。`valC` 是要跳转到的地址，`valP` 是下一条指令的地址。`jxx` 在执行阶段检查条件码和跳转条件，产生一个一位信号 `Cnd`，在更新 PC 阶段根据 `Cnd` 的值决定是否跳转。`call` 在执行阶段更新栈指针，在访存阶段将 `valP` 压入栈，在写回阶段写入栈指针的新值。`ret` 在执行阶段更新栈指针，访存阶段弹出返回地址，写回阶段写入栈指针的新值，更新 PC。
+
+![](images/jxx-call-ret.png)
+
+类似地，`cmovXX`：
+
+![](images/cmovxx.png)
+
+
+### SEQ 硬件结构
+
+同各个阶段相关的硬件单元（hardware units）负责执行每个阶段的处理。所有硬件单元的处理都在**一个时钟周期**完成。
+
+![](images/SEQ抽象视图.png)
+
+- **取指**：将程序计数器寄存器作为地址，指令内存读取指令字节，PC 增加器（PC incrementer）计算 `valP`。
+- **译码**：从寄存器文件的读端口 `A` 和 `B` 同时读取 `valA` 和 `valB`。
+- **执行**：计算 `valE`，更新条件码寄存器 CC。有条件时，根据条件码和传送条件计算 `Cnd`。
+- **访存**：从数据内存读取 `valM`，或将 `valA` 写入数据内存。
+- **写回**：寄存器文件有两个写端口。端口 `E` 用来写入 `valE`，端口 `M` 用来写入 `valM`。
+- **更新 PC**：下一条指令的地址选择自 `valP`、`valC` 或 `valM`，并将其写入程序计数器寄存器。
+
+![](images/SEQ硬件结构.png)
+
+- 白色方框表示*时钟寄存器*。程序计数器 PC 是 SEQ 中唯一的时钟寄存器
+- 浅蓝色方块表示*硬件单元*。包括内存、ALU、寄存器文件、PC 增加器、条件码寄存器等。我们只把它们当作黑盒。
+- 灰色圆角矩形表示*控制逻辑块*。这些块用来从一组信号源中进行选择，或计算一些布尔函数。
+- 白色圆形表示*线路的名字的说明*。它们只是线路的标识。
+- 宽度为*字长*的数据连接用*中等粗度的线*表示。它们实际上是一簇 64 根线。
+- 宽度为*字节或更窄*的数据连接用*细线*表示。它们实际上是一簇 4 根或 8 根线。
+- *单个位*的数据连接用*虚线*表示。
+
+四个寄存器 ID 信号：`srcA`，`valA` 的源；`srcB`，`valB` 的源；`dstE`，`valE` 的目的；`dstM`，`valM` 的目的。
+
+![](images/OPq-mrmovq的计算步骤.png)
+
+
+### SEQ 的时序
+
+SEQ 的实现包括组合逻辑和两种存储器设备：时钟寄存器（程序计数器和条件码寄存器）以及随机访问存储器（寄存器文件、指令内存和数据内存）。组合逻辑不需要时序或控制，因为只要输入变化，其值就通过逻辑门网络传播。我们认为*读随机访问存储器的操作和组合逻辑一样，只要输入的地址变化，输出的字就自动变化，并通过逻辑门网络传播*。对于较小的电路，这是合理的；对于较大的电路，可以用特殊的时钟电路模拟这个效果。指令内存只用来读指令，我们可以将这个单元看作组合逻辑。
+
+**程序计数器、条件码寄存器、数据内存和寄存器文件**这四个硬件单元的时序需要被明确控制。它们被一个*时钟信号*控制。每个时钟周期，程序计数器都会装载新的指令地址。条件码寄存器只在执行整数运算指令时被装载。数据内存只在执行 `rmmovq`、`pushq` 或 `call` 时被写入。寄存器文件的两个写端口允许每个时钟周期更新两个程序寄存器。
+
+我们将每条指令拆分成了 6 个按顺序执行的阶段，但在硬件结构中，这些阶段实际上是“同时”进行的。通过寄存器和内存的时钟控制，硬件获得了如同顺序执行的效果。
+
+能够“化同时为顺序”，是因为我们遵循了**从不回读**的原则。**处理器从来不需要为了完成一条指令的执行而去读由该指令更新了的状态**。例如，如果我们对 `pushq` 的实现变为*先将 `%rsp` 减 8，再将更新后的 `%rsp` 值作为写操作的地址*，那么我们为了执行内存操作，就需要先从寄存器文件读出更新后的 `%rsp`，从而违背了此原则。实际上，我们的实现是*先产生出更新后的 `%rsp` 值作为信号 `valE`，然后将 `valE` 既作为写回栈指针的数据，又作为内存写的地址*。因此，在时钟上升开始下一个周期时，处理器就可以同时执行寄存器写和内存写了。
+
+又例如，有的指令（整数运算）设置条件码，有的指令（条件跳转）读取条件码，但没有指令既设置条件码，又读取条件码。在任何指令试图读之前，它们都会更新。
+
+寄存器文件、指令内存和数据内存的读取被看成是组合逻辑。每个时钟周期开始时，状态单元（程序计数器、条件码寄存器、寄存器文件和数据内存）的值是根据上一条指令设置的。信号通过组合逻辑传播，生成新的状态单元的值。在下一个周期开始时，这些值会被加载到状态单元中。
+
+简言之，SEQ 的硬件实现可以描述为：用时钟控制状态单元的更新，值通过组合逻辑传播。
+
+![](images/跟踪SEQ的执行周期.png)
+
+
+
+### SEQ 阶段的实现
+
+![](images/HCL描述的常数值.png)
+
+#### 取值阶段
+
+指令内存以 PC 的值作为地址的起始字节，一次从内存中读出 10 个字节。第一个字节被解释成指令字节，输入 Split 单元，被分成两个 4 位的数输入两个控制逻辑块 icode 和 ifun。这两个控制逻辑块计算指令和功能码：或者将输入值照样输出，或者当指令地址不合法时（由信号 `imem_error` 指明）使这些值对应于 `nop` 指令（icode 置 1，ifun 置 0）。
+
+根据 icode 的值，三个一位的信号被计算出来：`instr-valid` 检查指令合法性，`need_regids` 检查指令是否包括一个寄存器指示符字节，`need_valC` 检查指令是否包括一个常数字。（当指令地址越界时会产生的）`instr_valid` 和 `imem_error` 在访存阶段被用于产生状态码。
+
+```c
+bool need_regids =
+        icode in {IRRMOVQ, IOPQ, IPUSHQ, IPOPQ, IIRMOVQ, IRMMOVQ, IMRMOVQ};
+```
+
+![](images/SEQ取指阶段.png)
+
+剩下 9 个字节是寄存器指示符字节和常数字的组合编码。硬件单元 Align 将他们放入寄存器字段和常数字中。若 `need_redids` 为 1，则第一个字节被分开放入 `rA` 和 `rB`；否则，`rA` 和 `rB` 被置为 `0xF(RNONE)`。Align 同时根据 `need_regids` 产生常数字 `valC`：若 `need_valC` 为 1，则 `valC` 为字节 2 ~ 9；否则，`valC` 为字节 1 ~ 8。
+
+PC 增加器根据 PC、`need_regids` 和 `need_valC` 的值产生信号 `valP`：$\operatorname{valP}=\operatorname{PC}+1+\operatorname{need\_regids}+8\operatorname{need\_valC}$
+
+#### 译码和写回阶段
+
+寄存器文件有两个读端口和两个写端口。每个端口有一个地址连接和一个数据连接。例如读端口 A 的地址连接是 `srcA`，数据连接是 `valA`；而写端口 E 的地址连接是 `dstE`，数据连接是 `valE`。地址连接是一个寄存器 ID，而数据连接是一组 64 根线路。
+
+根据 `icode` 以及 `rA` 和 `rB`，可能还有 `Cnd` 条件信号，`dstE`、`dstM`、`srcA` 以及 `srcB` 四个块产生出四个不同的寄存器 ID
+
+```c
+word srcA = [
+    icode in { IRRMOVQ, IRMMOVQ, IOPQ, IPUSHQ } : rA;
+    icode in { IPOPQ, IRET } : RRSP;
+    1 : RNONE;
+];
+```
+
+暂时忽略条件移动指令，可以写出 `dstE` 的 HCL 描述：
+
+```c
+// Conditional move not implemented correctly
+word dstE = [
+    icode in { IRRMOVQ } : rB;
+    icode in { IIRMOVQ, IOPQ } : rB;
+    icode in { IPUSHQ, IPOPQ, ICALL, IRET } : RRSP;
+    1 : RNONE;
+];
+```
+
+![](images/SEQ译码写回阶段.png)
+
+对于指令 `popq %rsp`，写端口 E 和 M 会同时对 `%rsp` 写入。为了让 `popq %rsp` 弹出的是 `%rsp` 的旧值，我们需要令 M 端口的优先级高于 E 端口。这样，当 E 和 M 端口同时写入时，**只有 M 端口的写入会发生**。
+
+
+#### 执行阶段
+
+ALU 根据 `alufun` 信号，对 `aluA` 和 `aluB` 执行 ADD、SUBTRACT、AND 或 EXCLUSIVE-OR 运算。
+
+```c
+word aluA = [
+    icode in { IRRMOVQ, IOPQ } : valA;
+    icode in { IIRMOVQ, IRMMOVQ, IMRMOVQ } : valC;
+    icode in { ICALL, IPUSHQ } : -8;
+    icode in { IRET, IPOPQ } : 8;
+    // Other instructions don't need ALU
+];
+```
+
+```c
+word alufun = [
+    icode == IOPQ : ifun;
+    1 : ALUADD;
+];
+```
+
+![](images/SEQ执行阶段.png)
+
+每次运行时，ALU 都会产生三个与条件码相关的信号：零、符号和溢出。我们希望只在执行 `OPq` 时才设置条件码，因此用控制信号 `set_cc` 来控制条件码是否被设置：`bool set_cc = icode in { IOPQ };`
+
+“cond”会根据条件码和 `ifun` 产生一位信号 `Cnd`，决定是否进行条件分支或条件数据传送。`Cnd` 在设置条件传送时的 `dstE` 和条件传送的下一个 PC 逻辑中被用到。
+
+```c
+// Conditional move now implemented correctly
+word dstE = [
+    icode in { IRRMOVQ } && Cnd : rB;
+    icode in { IIRMOVQ, IOPQ } : rB;
+    icode in { IPUSHQ, IPOPQ, ICALL, IRET } : RRSP;
+    1 : RNONE;
+];
+```
+
+#### 访存阶段
+
+控制块 Mem.addr 和 Mem.data 产生内存地址和待写入数据的值，Mem.read 和 Mem.write 产生读写操作的控制信号。进行读操作时，`valM` 是读出的值。
+
+```c
+word mem_addr = [
+    icode in { IRMMOVQ, IPUSHQ, ICALL, IMRMOVQ } : valE;
+    icode in { IPOPQ, IRET } : valA;
+    // Other instructions don't need address
+];
+```
+![](images/SEQ访存阶段.png)
+
+在访存阶段的最后，处理器根据取指阶段产生的 `icode`、`imem_error`、`instr_valid` 和数据内存产生的 `dmem_error`，计算状态码 `Stat`。
+
+#### 更新 PC 阶段
+
+根据 `icode` 和 `Cnd` 产生 PC 的新值。
+
+```c
+word new_pc = [
+    icode == ICALL : valC;
+    icode == IJXX && Cnd : valC;
+    icode == IRET : valM;
+    1 : valP;
+];
+```
+
+![](images/SEQ更新PC阶段.png)
+
+
+## 流水线的通用原理
 
