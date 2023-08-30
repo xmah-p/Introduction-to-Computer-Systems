@@ -12,6 +12,4 @@ int main() {
     scf("1 2", arr);
     printf("%d %d\n", arr[0], arr[1]);
 
-    std::initializer_list<int> need_regids = {IRRMOVQ, RMMOVQ, MRMOVQ, OPQ,
-                                              PUSHQ,   POPQ,   CMOVXX};
 }
