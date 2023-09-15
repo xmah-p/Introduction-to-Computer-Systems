@@ -1,5 +1,10 @@
 [TOC]
 
+# Misc
+
+**当 $x=\operatorname{TMin}_{32}$ 时，$-x=x$**.
+
+
 # 信息的表示和处理
 
 $$(a\mid b)\mid c=a\mid (b\mid c)$$
@@ -2964,7 +2969,7 @@ void combine3(vec_ptr v, data_t *dest) {
     vmovsd  (%rbx), %xmm0    // read from mem
     vmulsd  (%rdx), %xmm0, %xmm0  // mult from mem
     vmovsd  %xmm0, (%rbx)    // write back to mem
-    addq    $8, %rbx
+    addq    $8, %rdx
     cmpq    %rax, %rbx
     jne     .L17
 ```
@@ -2989,4 +2994,299 @@ void combine4(vec_ptr v, data_t *dest) {
 
 这显著提高了性能。
 
-实际上 `combine3` 和 `combine4` 的行为可能不一致，这也是编译器没有将前者优化为后者的原因。例如如果目标位置 `dest` 被设定为向量的最后一个元素。
+实际上 `combine3` 和 `combine4` 的行为可能不一致，例如当目标位置 `dest` 被设定为向量的最后一个元素时。这也是编译器没有将前者优化为后者的原因。
+
+开 O2 后，`combine3` 的性能得到提升，去掉了一条完全无用的 `vmovsd` 指令，但仍然不及 `combine4`：
+
+```c
+// Compiled O2
+// dest in %rbx, data+i in %rdx, data+length in %rax
+.L17:
+    vmulsd  (%rdx), %xmm0, %xmm0  // mult from mem
+    addq    $8, %rdx
+    cmpq    %rax, %rbx
+    vmovsd  %xmm0, (%rbx)    // write back to mem
+    jne     .L17
+```
+
+## 理解现代处理器
+
+当一系列指令必须按照严格顺序执行时（一条未完，另一条不能开始），就会遇到**延迟界限（latency bound）**。它会限制程序性能。**吞吐量界限（throughput bound）**刻画处理器功能单元的原始计算能力，它是性能的终极限制。
+
+### 整体操作
+
+**超标量（superscalar）**：一个时钟周期内可以执行多个操作，而且是**乱序（out-of-order）**的。
+
+整个设计分为**指令控制单元（Instruction Control Unit, ICU）**和**执行单元（Execation Unit, EU）**。前者从内存中读出指令序列，并根据指令序列生成一组针对程序数据的基本操作；后者执行这些操作。
+
+![](images/乱序处理器框图.png)
+
+ICU 从**指令高速缓存（instruction cache）**读取指令。通常，ICU 会在很早之前取指，保证有充足的时间译码，并把操作发送到 EU。对于分支预测，处理器使用**投机执行（speculative execution）**技术，它会取出预测分支会跳到的地方的指令，对它们译码，甚至执行，若过后确定分支预测错误，会将状态重新设定回分支点的状态，并开始取出执行另一个方向上的指令。分支预测集成在*取值控制*的块中。
+
+加载单元和存储单元各有一个加法器完成地址计算，它们通过**数据高速缓存（data cache）**访问数据内存。数据高速缓存和退役单元是执行结果与程序寄存器和数据内存之间的一层屏障，它们保证分支预测错误造成的错误指令的执行结果不会写入寄存器和数据内存。如果分支预测错误，EU 会丢弃分支点之后计算出来的结果，并发信号给分支单元，指出分支预测错误和正确的分支目的。
+
+ICU 中，**退役单元（retirement unit）**记录正在进行的处理，确保它遵守机器级程序的顺序语义。译码时，关于指令的信息被放在一个 FIFO 队列。一旦一条指令被完成，且所有引起此指令的分支点被确认为预测正确，那么这条指令就可以**退役（retired）**了，所有对程序寄存器的更新也就可以被执行了。如果引起此指令的某个分支点预测错误，那么这条指令就会被**清空（flushed）**，它的计算结果被丢弃。
+
+各种信息可以在执行单元之间传送（数据转发），最常见的机制是**寄存器重命名（register renaming）**。当一条更新寄存器 `r` 的指令译码时，产生标记 `t`，条目 `(r, t)` 被加入到一张重命名表中。**重命名表包含有未进行的写操作的寄存器**。当随后以 `r` 为操作数的指令译码时，发送到执行单元的操作会包含 `t` 作为操作数源的值。当某个执行单元完成第一个操作时，会生成结果 `(v, t)`，所有等待 `t` 作为源的操作就可以使用 `v` 作为源值了。
+
+### 功能单元的性能
+
+延迟（latency）：完成运算所需的总时间
+发射时间（issue time）：两个连续的同类型的运算之间需要的最小时钟周期数
+容量（capacity）：能够执行该运算的功能单元的数量
+
+![](images/参考机的操作延迟.png)
+
+发射时间为 $1$ 的功能单元是**完全流水线化（fully pipelined）**的，它表明每个时钟周期都可以开始一个新的运算。除法器不是完全流水线化的，它的发射时间等于延迟，这意味着在开始新运算之前，除法器必须完成整个除法。由于不同的除法计算需要的步骤不一样，所以除法的发射和延迟是一个范围。
+
+最大吞吐量：容量与发射时间的比值。
+
+| 界限 | 整数加法 | 整数乘法 | 浮点加法 | 浮点乘法 |
+| :---: | :---: | :---: | :---: | :---: |
+| 延迟界限 | 1.00 | 3.00 | 3.00 | 5.00 |
+| 吞吐量界限 | 0.50 | 1.00 | 1.00 | 0.50 |
+
+延迟界限给出了任何必须按照严格顺序完成合并运算的 `combine` 函数所需的最小 CPE 值。吞吐量界限根据功能单元产生结果的最大速率给出了 CPE 的最小界限。虽然整数加法的吞吐量是 $0.25$，但由于需要从内存读数据，而每个时钟周期只能读两个数据，因此吞吐量界限是 $0.50$.
+
+
+### 处理器操作的抽象模型
+
+![](images/combine4-5测量CPE.png)
+
+检查一下 `combine4` 的 CPE 测量值，可以发现：**除了整数加法的情况，测量值与处理器的延迟界限是一致的**。这表明函数性能取决于求和 / 乘积运算。
+
+#### 程序的数据流图
+
+```c
+// Inner loop of combine4, data_t = double, OP = *
+// acc in %xmm0, data+i in %rdx, data+length in %rax
+.L25:
+    vmulsd  (%rdx), %xmm0, %xmm0  // acc *= data[i]
+    addq    $8, %rdx    // ++i
+    cmpq    %rax, %rdx
+    jne     .L25
+```
+
+![](images/combine4内循环的图形化表示.png)
+
+我们将循环访问的寄存器分为四类：**只读**（如 `%rax`）、**只写**、**局部**（被使用和修改，但迭代和迭代之间不相关，如条件码寄存器）、**循环**（被使用和修改，且一次迭代中产生的值会在后续的迭代中用到，如 `%rdx` `%xmm0`）。循环寄存器之间的操作链决定了性能的瓶颈。
+
+![](images/combine4数据流图.png)
+
+![](images/combine4关键路径.png)
+
+程序有两条数据相关链，由于浮点乘法的延迟比整数加法大，所以左边的链是**关键路径**。
+
+如何对程序做变换，使得唯一的限制变成吞吐量界限？
+
+
+
+## 循环展开
+
+$k\times 1$ 循环展开的上限是 $n-k+1$，每次迭代对索引 `i` 到 `i+k-1` 的元素进行计算，然后使索引 `i += k`。最后，对剩余的元素进行计算。
+
+```c
+/* 2 * 1 loop unrolling */
+void combine5(vec_ptr v, data_t* dest) {
+    long i;
+    long len = vec_length(v);
+    long limit = len - 2 + 1;
+    data_t* data = get_vec_start(v);
+    data_t acc = IDENT;
+
+    /* Combine 2 elements at a time */
+    for (i = 0; i < limit; i += 2) {
+        acc = (acc OP data[i]) OP data[i+1];
+    }
+
+    /* Finish any remaining elements */
+    for (; i < len; i++) {
+        acc = acc OP data[i];
+    }
+    *dest = acc;
+}
+```
+
+![](images/combine4-5测量CPE.png)
+
+对于整数加法，循环展开通过减少循环开销操作提高了性能，但其他情况的性能没有提高，因为关键路径并不在于循环开销。**循环展开不能将性能改进得超过延迟界限**。
+
+只要优化等级够高，编译器就会自动进行循环展开。
+
+![](images/combine5数据流图.png)
+
+## 提高并行性
+
+加法和乘法的单元是完全流水线化的，然而我们囿于数据相关，并未利用这一点。
+
+### 多个累计变量
+
+```c
+/* 2 * 2 loop unrolling */
+void combine6(vec_ptr v, data_t* dest) {
+    long i;
+    long len = vec_length(v);
+    long limit = len - 1;
+    data_t* data = get_vec_start(v);
+    data_t acc0 = IDENT;
+    data_t acc1 = IDENT;
+
+    /* Combine 2 elements at a time w/ 2 acculators */
+    for (i = 0; i < limit; i += 2) {
+        acc0 = acc0 OP data[i];    // even indices
+        acc1 = acc1 OP data[i+1];  // odd indices
+    }
+
+    /* Finish any remaining elements */
+    for (; i < len; i++) {
+        acc0 = acc0 OP data[i];
+    }
+    *dest = acc0 OP acc1;
+}
+```
+
+我们既做循环展开，又做两路并行，这提高了所有情况的性能.并且打破了延迟界限：
+
+| 函数 | 整数加法 | 整数乘法 | 浮点加法 | 浮点乘法 |
+| :---: | :---: | :---: | :---: | :---: |
+| combine6 | 0.81 | 1.51 | 1.51 | 2.51 |
+
+将循环展开 $k$ 次，并且并行地累积 $k$ 个值，就得到 $k\times k$ 循环展开。$k$ 足够大时，程序在所有情况下几乎都能达到吞吐量界限。对延迟为 $L$，容量为 $C$ 的操作，这要求 $k\geq C\cdot L$。
+
+![](images/combine6数据流图.png)
+
+对于整数运算，`combine6` 的结果和 `combine5` 一致。然而对于浮点运算，由于**结合律不成立**，`combine6` 的结果和 `combine5` 可能不一致（偶数索引都极大，奇数索引都极小）。有些编译器会对整数运算做类似的变换，但大部分编译器不会对浮点运算做此类变换。
+
+### 重新结合变换
+
+```c
+/* 2 * 1a loop unrolling */
+void combine7(vec_ptr v, data_t* dest) {
+    long i;
+    long len = vec_length(v);
+    long limit = len - 1;
+    data_t* data = get_vec_start(v);
+    data_t acc = IDENT;
+
+    for (i = 0; i < limit; i += 2) {
+        acc = acc OP (data[i] OP data[i+1]);
+    }
+
+    /* Finish any remaining elements */
+    for (; i < len; i++) {
+        acc = acc OP data[i];
+    }
+    *dest = acc;
+}
+```
+
+它与 `combine5` 的唯一区别只在括号的位置，这被称为**重新结合变换（reassociation transformation）**，它可以带来意想不到的性能提升：整数加法的性能与 `combing5` 相当，而其他情况的性能与 `combine6` 相当，是 `combing5` 的两倍。
+
+| 函数 | 整数加法 | 整数乘法 | 浮点加法 | 浮点乘法 |
+| :---: | :---: | :---: | :---: | :---: |
+| combine7 | 1.01 | 1.51 | 1.51 | 2.51 |
+
+重新结合变换减少了数据相关，只有 `acc` 与 `data[i] OP data[i+1]` 之间的 `mult` 运算存在迭代中的数据相关。本次迭代中 `data[i]` 和 `data[i+1]` 之间的 `mult` 不必等到上一次迭代结束才能执行，即下次迭代的第一个乘法和本次迭代的第二个乘法是重叠执行的。
+
+![](images/k-1a数据流图.png)
+
+对于浮点，编译器一般不会做重新结合变换。
+
+（练习 5.8）
+
+## 一些限制因素
+
+### 寄存器溢出
+
+如果并行度 $p$ 超过了可用的寄存器数量，那么编译器会诉诸**溢出（spilling）**，将一些临时值存放在内存上（一般是运行时堆栈）。因此，$20\times 20$ 的循环展开的性能可能比 $10\times 10$ 的循环展开差。
+
+### 分支预测和预测错误处罚
+
+#### 不要过分关心可预测的分支
+
+#### 书写适合用条件传送实现的代码
+
+三目运算符是好的。
+
+```c
+/* CPE = 13.5 */
+void minmax1(long a[], long b[], long n) {
+    long i;
+    for (i = 0; i < n; i++) {
+        if (a[i] > b[i]) {
+            long t = a[i];
+            a[i] = b[i];
+            b[i] = t;
+        }
+    }
+}
+
+/* CPE = 4.0 */
+void minmax2(long a[], long b[], long n) {
+    long i;
+    for (i = 0; i < n; i++) {
+        long min = a[i] < b[i] ? a[i] : b[i];
+        long max = a[i] < b[i] ? b[i] : a[i];
+        a[i] = min;
+        b[i] = max;
+    }
+}
+```
+
+## 理解内存性能
+
+参考机有两个加载单元，每个可以保存 72 个未完成的读请求。它还有一个存储单元，可以保存 42 个写请求。它们通常可以每个时钟周期开始一个操作。
+
+### 加载的性能
+
+如果每个被计算的元素都需要加载 $k$ 个值，那么 CPE 不可能小于 $k/N$，其中 $N$ 为加载单元的数量。
+
+### 存储的性能
+
+没有加载，只有存储的操作不会产生数据相关。
+
+**写 / 读相关（write/read dependency）**：一个内存读的结果依赖于一个最近的内存写。它会导致性能下降。
+
+存储缓冲区包含已经被发射到存储单元但还未完成的存储操作的地址及数据。加载操作会先检查存储缓冲区，若地址匹配，则从缓冲区取出对应数据作为结果（类似转发）。
+
+```c
+void write_read(long *src, long *dest, long n) {
+    long cnt = n;
+    long val = 0;
+
+    while (cnt) {
+        *dst = val;
+        val = *src + 1;
+        cnt--;
+    }
+}
+
+write_read(&a[0], &a[1], 3);    // A
+write_read(&a[0], &a[0], 3);    // B
+```
+
+A 没有写 / 读相关，B 有写 / 读相关。
+
+```c
+// Inner loop of write_read
+// src in %rdi, dst in %rsi, val in %rax
+.L3：
+    movq    %rax, (%rsi)    
+    movq    (%rdi), %rax
+    addq    $1, %rax
+    subq    $1, %rdx
+    jne     .L3
+```
+
+![](images/write-read操作.png)
+
+存储操作被分为 `s_addr` 和 `s_data`，前者在存储缓冲区建立条目并设置地址，后者设置此条目的数据字段。
+
+对于 A，源和目的地址不同，没有数据相关，唯一的关键路径是 `cnt--` 构成的；对于 B，源和目的地址相同，这使得 `s_data` 和 `load` 之间产生了数据相关，关键路径成为了存储、加载和增加数据的链。
+
+![](images/write-read数据流表示.png)
+
+
+
+# 存储器层次结构
+
