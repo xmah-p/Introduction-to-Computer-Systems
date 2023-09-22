@@ -2,6 +2,135 @@
 
 # Misc
 
+## 信息的表示和处理
+
+### 整数字面量
+
+整数是以数字开头的。`-2147483647` 是一个常量表达式。
+
+字面量推导的规则：
+- ISO C99：
+    - 十进制：`int`、`long`、`long long`（**永远都会是有符号数**）
+    - 十六进制：`int`、`unsigned`、`long`、`unsigned long`、`long long`、`unsigned long long`
+- ISO C90：
+    - 十进制：`int`、`long`、`unsigned`、`unsigned long`
+    - 十六进制：`int`、`unsigned`、`long`、`unsigned long`
+
+`-2147483648` 中的 `2147483648` 参与类型推导。它在 ISO C90 32 位的机器上会被推导为 `unsigned`；在 ISO C90 64 位的机器上会被推导为 `long`；而在 ISO C99 的机器上被推导为 `long long`（32 位）和 `long`（64 位）。之后，`-2147483648` 作为一个常量表达式被运算。在被推导为 `unsigned` 的情况下，$-2147483648 == 2^32 - 2147483648 = 2147483648$。
+
+`2147483647 + 1 < 2147483648` 在 ISO C90 32 位下为假，因为右边的 `2147483648` 被推导为 `unsigned` 类型。
+
+
+
+### `double` 不一定比 `float` 精确
+
+```c
+float f1 = 0.1, f2 = 0.2, f3 = 0.3;
+double d1 = 0.1, d2 = 0.2, d3 = 0.3;
+f1 + f2 == f3;    // true
+d1 + d2 == d3;    // false
+```
+
+1. `0.1` 和 `0.2` 和 `0.3` 在二进制下都是无限循环小数 循环节长是 4
+2. `float` 和 `double` 的 `frac` 一个是 4 的倍数 一个不是
+3. 因此在末尾的舍入可能导致不同的行为
+
+### 运算符优先级
+
+| 优先级 | 运算符 | 结合律 |
+| :----: | :----: | :----: |
+| 1 | 后缀运算符：`()`、`[]`、`.`、`->`、`++`、`--` | 从左到右 |
+| 2 | 一元运算符：`++`、`--`、`!`、`~`、`+`、`-`、`*`、`&`、`sizeof`、`_Alignof` | 从右到左 |
+| 3 | 类型转换运算符 | 从右到左 |
+| 4 | 乘除法运算符：`*`、`/`、`%` | 从左到右 |
+| 5 | **加减法运算符**：`+`、`-` | 从左到右 |
+| 6 | **移位运算符**：`<<`、`>>` | 从左到右 |
+| 7 | **关系运算符**：`<`、`<=`、`>`、`>=` | 从左到右 |
+| 8 | **相等运算符**：`==`、`!=` | 从左到右 |
+| 9 | **按位与运算符**：`&` | 从左到右 |
+| 10 | **按位异或运算符**：`^` | 从左到右 |
+| 11 | **按位或运算符**：`|` | 从左到右 |
+| 12 | **逻辑与运算符**：`&&` | 从左到右 |
+| 13 | **逻辑或运算符**：`||` | 从左到右 |
+| 14 | **条件运算符**：`?:` | 从右到左 |
+| 15 | **赋值运算符**：`=``+=`、`-=`、`*=`、`/=`、`%=`、`<<=`、`>>=`、`&=`、`^=`、`|=` | 从右到左 |
+| 16 | **逗号运算符**：`,` | 从左到右 |
+
+### 负数编码
+
+原码（Sign-Magnitude）：最高位决定符号，其余位不变（IEEE 754 浮点数）
+反码（One's Complement）：最高位决定符号，若最高位为 `1` 则其余位取反
+
+### 取模
+
+`a % b = a - a / b * b`
+
+`-9 % 4 == -1`，而不是 3。
+
+### 大端小端
+
+```c
+// Small endian
+char* s = "2018";    // 0x32 0x30 0x31 0x38
+int* p = (int*)s;
+// *p == 0x38313032!
+short s1 = (*p) >> 12;    // 3 hex digits!
+unsigned u = s1;
+printf("0x%x\n", u);    // 0xffff8313
+```
+
+### 运算
+
+（`x` `y` 为 `int`，`ux` `uy` 为 `unsigned`）
+
+**异或有交换律和结合律**
+
+`x ^ y ^ x == y`
+`x ^ y ^ x ^ y ^ x == x`
+`x ^ y ^ (~x) - y == y ^ x ^ (~y) - x`
+
+`((x >> 1) << 1) <= x` 恒为真
+
+### 未定义行为
+
+- 非良构（ill-formed）
+- 非良构而不要求诊断（ill-formed no diagnostic required）
+- 实现定义行为（implementation-defined behavior）
+- 未指明行为（unspecified behavior）
+- 未定义行为（undefined behavior, UB）
+
+编译器假设程序永远不会包含未定义行为。
+
+**`char` 类型有无符号是未定义行为**
+
+**有符号整数溢出是未定义行为**，无符号整数溢出不是未定义行为
+
+**解引用空指针是未定义行为**
+
+**访问未初始化变量是未定义行为**
+
+C 标准不强制 IEEE 754，（也不强制补码）因此除以零是未定义的。
+
+IEEE 754 规定除以零得无穷，`0/0` 除外，结果为 NaN。
+
+```c
+char *p = "wikipedia"; // valid C, deprecated in C++98/C++03, ill-formed as of C++11
+p[0] = 'W'; // undefined behavior
+```
+
+```c
+// Meaningless checks from real code:
+// pointer p; signed int x;
+if (p + 100 < p)    // ptr overflow
+if (x + 100 < x)    // signed int overflow
+if (!(1 << x))      // oversized shift
+*p; if (p)          // null pointer dereference
+if (abs(x) < 0)     // Absolute value overflow
+```
+
+
+### 其他
+
 当 $x=\operatorname{TMin}_{32}$ 时，$-x=x$. 这同时说明 $\operatorname{Tmin}+\operatorname{Tmin}=0$
 
 IA32 下，`long` 和 `int` 都是 4 字节的，x86-64 中，`long` 是 8 字节的，`int` 是 4 字节的。
@@ -11,9 +140,14 @@ IA32 架构中，`((-9)>>1) + sizeof(long) > 0`
 - `sizeof(long) == 4`
 - `sizeof` 的**返回值是无符号数，参与的运算结果必定非负**
 
-**NaN 是无序的。有 NaN 参与的运算结果为 `false`**。
+
+### 浮点
+
+**NaN 是无序的。有 NaN 参与的运算结果为 `false`**。NaN 和任何数不会比较相等，包括自身。
 
 浮点加法有交换律，但是 `a + b == b + a` 在 `a` 和 `b` 都不是 NaN 的时候仍不一定成立。**因为 `-inf + inf == inf + (-inf)` 返回 `0`**。
+
+若 `d < 0`，则 `d * 2` 也小于 `0`。但是 `d * d` 不一定大于 `0`，因为 `d * d` 可能为 `0`。
 
 # 信息的表示和处理
 
@@ -129,6 +263,12 @@ float sum_elements(float a[], unsigned len) {
 ## 加法、求反
 
 **无符号整数加法**：加，然后截断，即模数加法。溢出当且仅当 $s=(x+y) \mod 2^\omega<x$。如果溢出，则实际结果比真实值小 $2^\omega$。
+
+```c
+int uadd_ok(unsigned x, unsigned y) {
+    return x + y >= x;
+}
+```
 
 **无符号数的求反**：$x=0$ 时，$-x=0$，$x>0$ 时，$-x=2^\omega-x$.
 
@@ -309,10 +449,10 @@ $12345$ 具有二进制表示 $11000000111001$，小数点左移 $13$ 位得 $1.
 ```c++
 int isTmax(int x) {
     // Tmax = 0x7fffffff
-    int k = x + x + 2;    // 利用溢出
+    int k = x + x + 2;    // 利用溢出是 UB
     int s1 = !k;
     int s2 = !!(x + 1);
-    return s1 & s2;    // x = 0x7fffffff 时，-O0 返回1 -O1 返回1
+    return s1 & s2;    // x = 0x7fffffff 时，-O0 返回1 -O1 返回0
 }
 ```
 
@@ -344,6 +484,25 @@ int howManyBits(int x) {
     return ((b1 + b2 + b4 + b8 + b16 + 2) & ~z) | (1 & z);
 }
 ```
+
+```c
+// 计算 x 的前导 0
+// w 的作用在于处理 x == 0 的边界情况
+int nlz(unsigned x) {
+    double w = 0.5;    // [0.5, 1)
+    double y = (double) x + w;
+    long long z;
+    memcpy(&z, &y, sizeof(y));
+    return ____ - (z >> __);
+}
+```
+先讨论 `x` 非零的情况：
+利用整数转换为浮点数时的规则，设前导 `0` 有 `k` 个，则 $32 - k - 1 = E = e - Bias$，而 `e == (z >> 52)`，因此 `k == 1054 - (z >> 52)`.
+
+再讨论 `x` 为零的情况，此时需要保证 `w` 的阶码位为 `0111 1111 110`，因此 $[0.5,1)$ 的双精度浮点数都满足要求。
+
+
+
 
 # 程序的机器级表示
 
