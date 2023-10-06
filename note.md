@@ -20,6 +20,7 @@
 
 `2147483647 + 1 < 2147483648` 在 ISO C90 32 位下为假，因为右边的 `2147483648` 被推导为 `unsigned` 类型。
 
+x86-64 里，`char` 一般是有符号的。
 
 
 ### `double` 不一定比 `float` 精确
@@ -148,6 +149,68 @@ IA32 架构中，`((-9)>>1) + sizeof(long) > 0`
 浮点加法有交换律，但是 `a + b == b + a` 在 `a` 和 `b` 都不是 NaN 的时候仍不一定成立。**因为 `-inf + inf == inf + (-inf)` 返回 `0`**。
 
 若 `d < 0`，则 `d * 2` 也小于 `0`。但是 `d * d` 不一定大于 `0`，因为 `d * d` 可能为 `0`。
+
+
+## 程序的机器级表示
+
+| 四字（64位） | 双字（32位） | 字（16位） | 字节（8位）| 用途 |
+| :----: | :----: | :----: | :----: | :----: |
+| `%rax` | `%eax` | `%ax` | `%al` | 返回值 |
+| `%rbx` | `%ebx` | `%bx` | `%bl` | 被调用者保存 |
+| `%rcx` | `%ecx` | `%cx` | `%cl` | 第 4 个参数 |
+| `%rdx` | `%edx` | `%dx` | `%dl` | 第 3 个参数 |
+| `%rsi` | `%esi` | `%si` | `%sil` | 第 2 个参数 |
+| `%rdi` | `%edi` | `%di` | `%dil` | 第 1 个参数 |
+| `%rbp` | `%ebp` | `%bp` | `%bpl` | 被调用者保存 |
+| `%rsp` | `%esp` | `%sp` | `%spl` | 栈指针 |
+| `%r8` | `%r8d` | `%r8w` | `%r8b` | 第 5 个参数 |
+| `%r9` | `%r9d` | `%r9w` | `%r9b` | 第 6 个参数 |
+| `%r10` | `%r10d` | `%r10w` | `%r10b` | 调用者保存 |
+| `%r11` | `%r11d` | `%r11w` | `%r11b` | 调用者保存 |
+| `%r12` | `%r12d` | `%r12w` | `%r12b` | 被调用者保存 |
+| `%r13` | `%r13d` | `%r13w` | `%r13b` | 被调用者保存 |
+| `%r14` | `%r14d` | `%r14w` | `%r14b` | 被调用者保存 |
+| `%r15` | `%r15d` | `%r15w` | `%r15b` | 被调用者保存 |
+
+`%rbx`、`%rbp`、`%r12`、`%r13`、`%r14`、`%r15` 是被调用者保存寄存器；`%rax`、`%rdi`、`%rsi`、`%rdx`、`%rcx`、`%r8`、`%r9`、`%r10`、`%r11` 都是调用者保存寄存器；`%rsp` 两者都不是。
+
+- `CF`：进位标志。最近的操作使最高位产生了进位。可用于检查无符号数的溢出。
+- `ZF`：零标志。最近的操作结果为 0.
+- `SF`：符号标志。最近的操作结果为负数。
+- `OF`：溢出标志。最近的操作导致补码溢出。
+
+
+参数按顺序依次存储在 `%rdi`、`%rsi`、`%rdx`、`%rcx`、`%r8` 和 `%r9` 中，它们都是调用者保存寄存器。
+
+
+在 64 位机器上，地址总是 64 位的，因此像 `(%eax)` 这样的操作数很有可能是错误的。我们认为它不合法
+
+`clto` 指令把 `%rax` 的值符号扩展，结果存放在 `%rdx`（高 64 位）和 `%rax`（低 64 位）两个寄存器中
+
+右移也会改变进位标志
+
+`sar %ebx`
+
+**无条件跳转可以是直接跳转，也可以是间接跳转**。
+
+**条件跳转只能是直接跳转**。
+
+`call` 可以间接跳转
+
+
+**通过栈传递参数时，所有数据大小向 8 的倍数对齐**
+
+`for` 和对应 `while` 转写的区别：`continue` 语句被跳过
+
+结构体的大小等于其最大成员大小的整数倍?
+
+可变栈帧
+
+gcc 一次申请的栈空间大小必须是 8 的倍数，且大于 16 字节。
+
+在调用新函数过程之前，`%rsp` 要 8 字节对齐（默认）或 16 字节对齐（ABI 规定，-fPIC 编译）
+
+局部变量被引用前需要放置到栈上，这些变量的放置需要与自身字节对齐
 
 # 信息的表示和处理
 
@@ -507,6 +570,13 @@ int nlz(unsigned x) {
 
 # 程序的机器级表示
 
+> 我们采用 ATT 格式汇编代码，它是 gcc、objdump 等工具的默认格式。微软和 Intel 使用 Intel 格式汇编，其主要区别在于
+> - 省略了指示大小的后缀：`mov` `push` `pop`
+> - 省略了寄存器前的 `%`
+> - 内存引用：`QWORD PTR [rbx]`
+> - 操作数顺序相反
+
+
 ## 数据格式
 
 | C 声明 | Intel 数据类型 | 汇编代码后缀 | 大小（字节）|
@@ -544,7 +614,7 @@ x86-64 的 CPU 包含一组 16 个存储 64 位值的**通用目的寄存器**�
 | `%r14` | `%r14d` | `%r14w` | `%r14b` | 被调用者保存 |
 | `%r15` | `%r15d` | `%r15w` | `%r15b` | 被调用者保存 |
 
-当指令**以 64 位寄存器为目标时**：生成 1 字节和 2 字节数字的指令会保持高位的字节不变；生成 4 字节数字的指令会把高位 4 个字节置 0.
+任何为寄存器生成 32 为值的指令都会把目的寄存器的高 32 位清零。
 
 ### 操作数格式
 
@@ -552,22 +622,22 @@ x86-64 的 CPU 包含一组 16 个存储 64 位值的**通用目的寄存器**�
 | :----: | :----: | :----: | :----: |
 | 立即数 | $$ \$\operatorname{Imm}$$ | $\operatorname{Imm}$ | 立即数寻址 |
 | 寄存器 | $r_a$ | $R[r_a]$ | 寄存器寻址 |
-| 存储器 | $\operatorname{Imm}(r_b,r_i,s)$ | $M[\operatorname{Imm}+R[r_b]+R[r_i]\times s]$ | 比例变址寻址 |
+| 存储器 | $\operatorname{Imm}(r_b,r_i,s)$ | $M[\operatorname{Imm} +R[r_b]+R[r_i]\times s]$ | 比例变址寻址 |
 
-比例因子 $s$ 必须是 $1, 2, 4, 8$ 中的一个。
+比例因子 $s$ 必须是 $1, 2, 4, 8$ 中的一个，因此 `(, %rax, 3)` 不合法。
 
-在 64 位机器上，地址总是 64 位的，因此像 `(%eax)` 这样的操作数很有可能是错误的。
+在 64 位机器上，地址总是 64 位的，因此像 `(%eax)` 这样的操作数很有可能是错误的。我们认为它不合法
 
 ### 数据传送指令
 
 MOV 类指令把数据从源位置复制到目的位置。MOV 类指令包括：
 - `movb`：字节
 - `movw`：字
-- `movl`：双字
-- `movq`：四字
+- `movl`：双字，会将目的寄存器的高 32 位清零
+- `movq`：四字，
 
 常规的 `movq` 指令只能以**表示 32 位补码的立即数作为源操作数**，把这个值**符号扩展**得到 64 位的值，放到目的位置。
-`movabsq` 指令能以**任意 64 位立即数值作为源操作数**，且**只能以寄存器作为目的位置**。
+`movabsq` 指令**只能以任意 64 位立即数值作为源操作数**，且**只能以寄存器作为目的位置**。
 
 x86-64 限制传送指令的**两个操作数不能都指向内存位置**（只能为 内存 -> 寄存器 -> 内存 的形式）。
 
@@ -582,25 +652,25 @@ movq %rax,-12(%rbp)     ; Reg -> Mem
 MOVZ 类和 MOVS 类将较小的源值复制到较大的目的位置。MOVZ 类指令执行**零扩展**，MOVS 类指令执行**符号扩展**。这些指令的目的位置**必须是寄存器**。
 
 - `movzbq`：字节 -> 四字（零扩展）
-- `movzbl`：字节 -> 双字（零扩展）
-- `movzwl`：字 -> 双字（零扩展）
+- `movzbl`：字节 -> 双字（零扩展），隐式地将目的寄存器的高 32 位清零
+- `movzwl`：字 -> 双字（零扩展），隐式地将目的寄存器的高 32 位清零
 - `movzbq`：字节 -> 四字（零扩展）
 - `movzwq`：字 -> 四字（零扩展）
+- 没有 `movzlq`
 
 - `movsbw`：字节 -> 字（符号扩展）
-- `movsbl`：字节 -> 双字（符号扩展）
-- `movswl`：字 -> 双字（符号扩展）
+- `movsbl`：字节 -> 双字（符号扩展），隐式地将目的寄存器的高 32 位清零
+- `movswl`：字 -> 双字（符号扩展），隐式地将目的寄存器的高 32 位清零
 - `movsbq`：字节 -> 四字（符号扩展）
 - `movswq`：字 -> 四字（符号扩展）
 - `movslq`：双字 -> 四字（符号扩展）
+- `cltq`：`%eax` -> `%rax`（符号扩展）
 
 为什么没有 `movzlq`？因为不同于 `movb` 和 `movw`，`movl` 会把高位的字节置 0，因此不需要双字到四字的零扩展。
 
 `movzbq` 经常被 `movzbl` 替代，因为 `movzbl` 的编码更短。`movzwl` 和 `movzwq` 也是如此。
 
-- `cltq`：`%eax` -> `%rax`（符号扩展）
-
-`cltq` 无操作数，完全等价于 `movslq %eax,%rax`。
+`cltq` 无操作数，完全等价于 `movslq %eax,%rax`，但编码更紧凑。
 
 示例：
 
@@ -622,74 +692,79 @@ dest_t* dp;
 | `unsigned char` | `long` | `movzbq (%rdi),%rax` | `movq %rax,(%rsi)` | 零扩展 |
 | `int` | `char` | `movl (%rdi),%eax` | `movb %al,(%rsi)` | 截断 |
 
-扩展时采用符号扩展还是零扩展，**取决于 `src_t` 是否为有符号表示**。这是因为 C 语言在类型转换时**先扩展，再转换符号**，即若 `ch` 类型为 `char`，则`(unsigned) ch` 等价于 `(unsigned) (int) ch`。
+x86-64 的 `char` 是有符号的。扩展时采用符号扩展还是零扩展，**取决于 `src_t` 是否为有符号表示**。这是因为 C 语言在类型转换时**先扩展，再转换符号**，即若 `ch` 类型为 `char`，则`(unsigned) ch` 等价于 `(unsigned) (int) ch`。
 
 
 ### 压入和弹出栈数据
 
-- `pushq Src`：栈指针 `%rsp` 减 8，然后把 `Src` 的值复制到新 `%rsp` 指向的内存位置，等价于 `subq $8,%rsp`  `movq Src,(%rsp)`
-- `popq Dest`：把 `%rsp` 指向的内存位置的值复制到 `Dest`，然后 `%rsp` 加 8，等价于 `movq (%rsp),Dest`  `addq $8,%rsp`
+- `pushq Src`：等价于 `subq $8, %rsp`  `movq Src, (%rsp)`
+- `popq Dest`：等价于 `movq (%rsp), Dest`  `addq $8, %rsp`
 
-栈指针 `%rsp` 保存着**栈顶元素的地址**，x86-64 中，栈向低地址方向增长，故**压栈时栈指针减小**。可以用标准的内存寻址方法访问栈内任意位置，比如 `movq 8(%rsp),%rdx` 会把栈顶起第二个元素的值复制到 `%rdx`。
+**`pushq` 先减栈指针，后压栈；`popq` 先弹栈，后加栈指针**。
+
+栈指针 `%rsp` 保存着**栈顶元素的地址**。
+
+x86-64 中，栈向低地址方向增长，故**压栈时栈指针减小**。
 
 
 ## 算术和逻辑操作
 
+## `leaq`、一元操作、二元操作、移位操作
 
-`leaq` （load effective address）指令是 `movq` 的变形。`leaq S,D` 将把 `S` 的有效地址（而不是它的内容）复制到 `D`。它可以灵活地用于算术操作，如 `leaq 7(%rdx, %rdx, 4),%rax` 设置 `%rax` 的值为 `5 * %rdx + 7`。**`leaq` 的目的操作数必须是寄存器**。
+`leaq` （load effective address）指令是 `movq` 的变形。`leaq S, D` 将=把 `S` 的有效地址（而不是它的内容）复制到 `D`。`leaq 7(%rdx, %rdx, 4), %rax` 设置 `%rax` 的值为 `5 * %rdx + 7`。
 
-```c
-long scale(long x, long y, long z) {
-    long t = x + 4 * y + 12 * z;
-    return t;
-}
-```
-
-```x86asm
-leaq    (%rdi,%rsi,4), %rax    ; t = x + 4 * y
-leaq    (%rdx,%rdx,2), %rdx    ; z = z + 2 * z
-leaq    (%rax,%rdx,4), %rax    ; t = t + 4 * z
-ret
-```
+**`leaq` 的目的操作数必须是寄存器，`leaq` 没有其他大小的变种**。
 
 - `INC Dest`：加 1
 - `DEC Dest`：减 1
 - `NEG Dest`：取负
 - `NOT Dest`：取补
 
-`Dest` 可以是寄存器或内存位置
+以上四个一元操作中，**`Dest` 可以是寄存器或内存位置**
 
-- `ADD Src,Dest`：加
-- `SUB Src,Dest`：减
-- `IMUL Src,Dest`：乘
-- `XOR Src,Dest`：异或
-- `OR Src,Dest`：或
-- `AND Src,Dest`：与
+- `ADD Src, Dest`：加
+- `SUB Src, Dest`：减
+- `IMUL Src, Dest`：乘
+- `XOR Src, Dest`：异或
+- `OR Src, Dest`：或
+- `AND Src, Dest`：与
 
-以上二元操作中，第一个操作数可以是立即数、寄存器或内存位置，第二个操作数可以是寄存器或内存位置。第二个操作数既是源又是目的位置，例如 `subq %rax,%rdx` 就相当于 `%rdx -= %rax`。
+以上二元操作中，**第一个操作数可以是立即数、寄存器或内存位置，第二个操作数可以是寄存器或内存位置**。第二个操作数既是源又是目的位置，例如 `subq %rax, %rdx` 就相当于 `%rdx -= %rax`。
 
-- `SAL k,Dest`：左移
-- `SHL k,Dest`：左移（等同于 `SAL`）
-- `SAR k,Dest`：算术右移（补码）
-- `SHR k,Dest`：逻辑右移（无符号数）
+- `SAL k, Dest`：左移
+- `SHL k, Dest`：左移（等同于 `SAL`）
+- `SAR k, Dest`：算术右移（补码）
+- `SHR k, Dest`：逻辑右移（无符号数）
 
-移位量 `k` 可以是**立即数**或者**单字节寄存器 `%cl`**。x86-64 中，移位量是**由 `%cl` 寄存器的低位给出**的。即，若 `%cl` 的值位 `0xFF`，则 `salb %cl,%rax` 会将 `%rax` 的值左移 7 位，`salw` 会移 15 位，`sall` 会移 31 位，而 `salq` 会移 63 位。
+移位操作中，**第一个操作数（移位量 `k`）可以是立即数或者单字节寄存器 `%cl`**。
+
+x86-64 中，移位量是**由 `%cl` 寄存器的低位给出**的。即，若 `%cl` 的值位 `0xFF`，则 `salb %cl,%rax` 会将 `%rax` 的值左移 7 位，`salw` 会移 15 位，`sall` 会移 31 位，而 `salq` 会移 63 位。
 
 
 以上指令中，除了右移指令要求区分补码和无符号数以外，其他指令都不区分补码和无符号数。**这是补码的优点：兼容无符号数**。
 
+### 特殊的算术操作
 
 x86-64 有限地支持 128 位数操作，它们被称为**八字（oct word）**
 
-`imulq Src` `mulq Src` 分别是补码八字乘法和无符号数八字乘法指令。它们都要求**一个乘数必须在 `%rax` 中**，而**另一个乘数作为操作数给出**。乘积存放在 `%rdx`（高 64 位）和 `%rax`（低 64 位）两个寄存器中。
+`imulq Src`：(`Src`) * (`%rax`) -> (`%rdx`, `%rax`)（补码乘法）
 
-> 指令的双操作数形式是 `imulq Src，Dest`。注意到**乘积被截断为 64 位后，无符号乘法和补码乘法的结果是一样的**，因此 64 位乘法指令只有一条。
+`mulq Src`：(`Src`) * (`%rax`) -> (`%rdx`, `%rax`)（无符号数乘法）
 
-`clto` 指令把 `%rax` 的值符号扩展，结果存放在 `%rdx`（高 64 位）和 `%rax`（低 64 位）两个寄存器中
+`cqto`：`(int128_t)%rax` -> (`%rdx`, `%rax`)
 
-`idivq Src` **将 `%rdx`（高 64 位）和 `%rax`（低 64 位）存放的 128 位数作为被除数**，`Src` 作为除数，执行**补码除法**，商存放在 `%rax` 中，余数存放在 `%rdx` 中。`divq Src` 执行**无符号数除法**，其余与 `idivq` 相同。
+`idivq Src`：(`%rdx`, `%rax`) / (`Src`) -> (`%rax`)；(`%rdx`, `%rax`) % (`Src`) -> (`%rdx`)（补码除法）
 
-对大多数 64 位除法应用来说，除数也常常是 64 位数。64 位的被除数存放在 `%rax` 中，而 `rdx` 应当置为全 0 或 `%rax` 的符号位（由 `clto` 指令实现）。以下是 64 位除法的例子：
+`divq Src`：(`%rdx`, `%rax`) / (`Src`) -> (`%rax`)；(`%rdx`, `%rax`) % (`Src`) -> (`%rdx`)（无符号数除法）
+
+`imulq Src` `mulq Src` 分别是补码八字乘法和无符号数八字乘法指令。计算两个 64 位数的全 128 位乘积。
+
+
+> 上一节介绍了 `imulq` 的双操作数形式：`imulq Src，Dest`。注意到**乘积被截断为 64 位后，无符号乘法和补码乘法的结果是一样的**，因此 64 位乘法指令不区分无符号和补码。
+
+在 Intel 文档里，`cqto` 叫做 `cqo`。
+
+被除数也常常是 64 位数。64 位的被除数存放在 `%rax` 中，而 `rdx` 应当置为 `%rax` 的符号位（由 `clto` 指令实现）。以下是 64 位除法的例子：
 
 ```c
 void remdiv(long x, long y, long* qp, long* rp) {
@@ -698,9 +773,8 @@ void remdiv(long x, long y, long* qp, long* rp) {
     *qp = q;
     *rp = r;
 }
-```
 
-```x86asm
+// x86asm
 ; void remdiv(long x, long y, long* qp, long* rp)
 ; x in %rdi, y in %rsi, qp in %rdx, rp in %rcx
 remdiv:
@@ -724,13 +798,13 @@ remdiv:
 
 它们被保存在 CPU 的一组单个位的条件码寄存器里。
 
-`leaq` 是用于地址计算的指令，它不会改变任何条件码。除此之外，所有的算术和逻辑指令（`INC` `DEC` `NEG` `NOT` `ADD` `SUB` `IMUL` `XOR` `OR` `AND` `SAL` `SHL` `SAR` `SHR`）都会更新条件码。
+`leaq` 不会改变任何条件码。除此之外，所有的算术和逻辑指令（`INC` `DEC` `NEG` `NOT` `ADD` `SUB` `IMUL` `XOR` `OR` `AND` `SAL` `SHL` `SAR` `SHR`）都会更新条件码。
 
-逻辑操作的**进位标志**和**溢出标志**会被置 0.
+逻辑操作的**进位标志 CF**和**溢出标志 OF**会被置 0.
 
-移位操作的**进位标志**会被设置为**最后一个被移出的位**，**溢出标志**会被设置为 0。
+移位操作的**进位标志 CF**会被设置为**最后一个被移出的位**，**溢出标志 OF**会被设置为 0。**右移也会改变进位标志**
 
-`INC` `DEC` 指令会设置**溢出标志**和**零标志**，但不会改变**进位标志**。
+`INC` `DEC` 指令会设置**溢出标志 OF**和**零标志 ZF**，但不会改变**进位标志 CF**。
 
 `CMP` 指令和 `TEST` 指令只设置条件码，不改变其他寄存器。
 
@@ -754,21 +828,23 @@ remdiv:
 | `seta D` | `setnbe` | `~CF&~ZF` | 超过（无符号 >） |
 | `setae D` | `setnb` | `~CF` | 超过或相等（无符号 >=） |
 | `setb D` | `setnae` | `CF` | 低于（无符号 <） |
-| `setbe D` | `setna` | `CF|ZF` | 低于或相等（无符号 <=） |
+| `setbe D` | `setna` | `CF\|ZF` | 低于或相等（无符号 <=） |
 
-`set D` 中的目标位置 `D` 必须是**单字节寄存器**。
+有符号比较使用 `SF` 和 `OF` 条件码，无符号比较使用 `CF` 和 `ZF` 条件码。
 
-```x86asm
+**`set D` 中的目标位置 `D` 必须是单字节寄存器**。
+
+```c
 int comp(data_t a, data_t b)
-a in %rdi, b in %rsi
 
+// x86-64 asm
+a in %rdi, b in %rsi
 comp:
-    cmpq    %rsi, %rdi    ; %rdi - %rsi
-    setl    %al
-    movzbl  %al, %eax     ; 和 movzbq %al, %rax 相同
+    cmpq    %rsi, %rdi    // cmpq b, a
+    setl    %al           // if (a < b), %al = 1; else %al = 0
+    movzbl  %al, %eax     // 和 movzbq %al, %rax 相同
     ret
 ```
-
 
 ### 跳转指令
 
@@ -784,20 +860,45 @@ comp:
 | `jg Label` | `jnle` | `~(SF^OF)&~ZF` | 大于（有符号 >） |
 | `jge Label` | `jnl` | `~(SF^OF)` | 大于等于（有符号 >=） |
 | `jl Label` | `jnge` | `SF^OF` | 小于（有符号 <） |
-| `jle Label` | `jng` | `(SF^OF)|ZF` | 小于等于（有符号 <=） |
+| `jle Label` | `jng` | `(SF^OF)\|ZF` | 小于等于（有符号 <=） |
 | `ja Label` | `jnbe` | `~CF&~ZF` | 超过（无符号 >） |
 | `jae Label` | `jnb` | `~CF` | 超过或相等（无符号 >=） |
 | `jb Label` | `jnae` | `CF` | 低于（无符号 <） |
-| `jbe Label` | `jna` | `CF|ZF` | 低于或相等（无符号 <=） |
+| `jbe Label` | `jna` | `CF\|ZF` | 低于或相等（无符号 <=） |
 
 - 直接跳转：`jmp .L1` 跳转目标是作为指令的一部分编码的
 - 间接跳转：`jmp *%rax` `jmp *(%rax)` 跳转目标从寄存器或内存中读出
 
-无条件跳转可以是直接跳转，也可以是间接跳转。条件跳转只能是直接跳转。
+**无条件跳转可以是直接跳转，也可以是间接跳转**。
 
-跳转指令有几种不同的编码，最常用的是 PC 相对（PC-relative）的，其次是给出“绝对”地址。PC 相对的机器代码会将**目标指令的地址**与**紧跟在跳转指令之后的指令的地址**之间的差作为目标的编码，这些地址偏移量可以编码为 1, 2 或 4 字节。“绝对”地址的编码直接用 4 个字节指定目标。
+**条件跳转只能是直接跳转**。
+
+跳转指令有几种不同的编码，最常用的是 PC 相对（PC-relative）的，其次是给出“绝对”地址。一般只会在很大（> 2 MB）的程序中使用绝对寻址。
+
+PC 相对的机器代码会将**目标指令的地址**与**紧跟在跳转指令之后的指令的地址**之间的差作为目标的编码，这些地址偏移量可以编码为 1, 2 或 4 字节。
+
+```c
+// PC-relative 编码示例：
+// 这是链接前的 .o 文件反汇编的结果
+// 链接后 地址 8 会被填写为 4004d8 但 jmp 的编码不变
+
+0:    48 89 f8    mov    %rdi, %rax
+// 地址 0x8 被编码为 03，表示下一条指令的地址 0x5 + 0x3
+3:    eb 03       jmp    8 <loop+0x8>
+5:    48 d1 f8    sar    %rax
+8:    48 85 c0    test   %rax, %rax
+// 同理，0x5 = 0xd + 0xf8 = 13 - 8 = 0x5
+b:    7f f8       jg     5 <loop+0x5>
+d:    f3 c3       repz retq
+```
+
+“绝对”地址的编码直接用 4 个字节指定目标。
 
 当执行 PC 相对寻址时，程序计数器的值时跳转指令的后一条指令的地址，这与 CPU 的早期实现有关。当时的 CPU 将更新 PC 的值作为执行指令的第一步。通过使用 PC 相对寻址，指令的编码可以很简洁，且目标代码可以在链接过程中不做改变。
+
+> `repz` 是 `rep` 的同义名，而 `retq` 是 `ret` 的同义名。此处的 `rep` 是一种空操作，避免 AMD 处理器的一个缺陷：当通过 JMP 指令跳转到 `ret` 时，处理器不能正确预测 `ret` 的目的。 
+
+### 用条件控制来实现条件分支
 
 ```c
 // C 中的 if-else
@@ -816,7 +917,8 @@ false:
     else-statement
 done:
 
-// 另一种汇编实现
+// 为什么判断的是 !t，而不是 t？
+// 如果判断 t：
     t = test-expr
     if (t)
         goto true;
@@ -826,18 +928,29 @@ true:
     then-statement
 done:
 
-// 通常的汇编实现对于无 else 的 if 语句更简练：
+// 对于无 else 的 if：
+// 通常版本：
     t = test-expr
     if (!t)
         goto done;
     then-statement
 done:
+
+// 改后版本：
+    t = test-expr
+    if (t)
+        goto true;
+    goto done;
+true:
+    then-statement
+done:
+
+// 因此，判断 !t 的通常写法可以省一个 goto，性能更好
 ```
 
 ### 条件传送
 
-
-数据的条件转移计算一个条件操作的两种结果，然后根据条件是否满足从中选取一个。这种操作无法完全替代跳转指令，但更符合现代处理器的性能特性。它可以用一条条件传送指令实现。
+数据的条件转移计算一个条件操作的两种结果，然后根据条件是否满足从中选取一个。这种操作**无法完全替代跳转指令**，但更符合现代处理器的性能特性。它可以用一条条件传送指令实现。
 
 ```c
 long absdiff(long x, long y) {
@@ -849,7 +962,7 @@ long absdiff(long x, long y) {
     return res;
 }
 
-// 使用条件赋值的实现
+// 条件传送的等价 C 代码：
 long cmovdiff(long x, long y) {
     long rval = y - x;
     long eval = x - y;
@@ -857,18 +970,17 @@ long cmovdiff(long x, long y) {
     if (ntest) rval = eval;
     return rval;
 }
-```
 
-```x86asm
+// x86-64 asm
 long absdiff(long x, long y)
 x in %rdi, y in %rsi
 absdiff:
-    movq   %rsi, %rax    ; %rax = y
-    subq   %rdi, %rax    ; %rax = y - x
+    movq   %rsi, %rax    // %rax = y
+    subq   %rdi, %rax    // %rax = y - x
     movq   %rdi, %rdx
-    subq   %rsi, %rdx    ; %rdx = x - y
+    subq   %rsi, %rdx    // %rdx = x - y
     cmpq   %rsi, %rdi
-    cmovge %rdx, %rax    ; if (x >= y) rval = eval
+    cmovge %rdx, %rax    // if (x >= y) rval = eval
     ret
 ```
 
@@ -887,15 +999,21 @@ absdiff:
 | `cmovb S, R` | `cmovnae` | `CF` | 低于（无符号 <） |
 | `cmovbe S, R` | `cmovna` | `CF|ZF` | 低于或相等（无符号 <=） |
 
-以上条件传送指令的源操作数可以是**寄存器或内存地址**，目的操作数必须是寄存器。**源和目的的值必须是 16、32 或 64 位长**。无条件指令的操作数长度显式编码在指令名中（如 `movw`）；对于条件传送指令，汇编器可以从目标寄存器推断操作数长度，因此不需要在指令名中显式指定。
+条件传送指令的**源操作数可以是寄存器或内存地址**，**目的操作数必须是寄存器**
+
+**源和目的的值必须是 16、32 或 64 位长，条件传送指令没有单字节版本**。
+
+无条件指令的操作数长度显式编码在指令名中（如 `movw`）；对于条件传送指令，汇编器可以从目标寄存器推断操作数长度，因此不需要在指令名中显式指定。
 
 和条件传送（JMP）不同，处理器无需预测测试的结果就可以执行条件传送。
 
 ```c
-// 示例
+// 示例：cmov 和 jmp 的区别：
+
+// 考虑以下 C 代码：
     v = test-expr ? then-expr : else-expr;
 
-// jmp
+// 若编码为跳转指令，等价的 C 代码为：
     if (!test-expr)
         goto false;
     v = then-expr
@@ -905,7 +1023,7 @@ false:
 done:
 // then-expr 和 else-expr 中只有一个会被求值
 
-// cmov
+// 若编码为 cmov：
     v = then-expr;
     ve = else-expr;
     if (!test-expr)
@@ -913,7 +1031,9 @@ done:
 // then-expr 和 else-expr 都会被求值
 ```
 
-如果 `then-expr` 和 `else-expr` 中的任意一个可能**产生错误或副作用**，那么就不能用条件传送指令实现。比如，`return (ptr ? *ptr : 0);` 就必须用分支代码编译，否则会出现间接引用空指针的错误。其次，如果 `then-expr` 和 `else-expr` 计算很复杂，那么用条件传送指令实现可能会降低性能。
+如果求值**包含错误或副作用**，如 `return (ptr ? *ptr : 0);` 就必须用分支代码编译，否则会出现间接引用空指针的错误。
+
+**如果 `then-expr` 或 `else-expr` 计算很复杂**，那么用条件传送指令实现可能反而降低性能。
 
 
 ### 循环
@@ -921,9 +1041,9 @@ done:
 #### `do-while`
 
 ```c
-do
+do {
     body-statement
-    while (test-expr);
+} while (test-expr);
 
 // 会被编译成
 
@@ -932,39 +1052,6 @@ loop:
     if (test-expr)
         goto loop;
 
-// 示例：
-
-// c
-long fact_do(long n) {
-    long res = 1;
-    do {
-        res *= n;
-        n -= 1;
-    } while (n > 1);
-    return res;
-}
-
-// x86acm-like c
-long fact_do_goto(long n) {
-    long res = 1;
-loop:
-    res *= n;
-    n -= 1;
-    if (n > 1)
-        goto loop;
-    return res;
-}
-
-// x86asm
-n in %rdi
-fact_do:
-    movl    $1, %eax    ; same as movq
-.L2:
-    imulq   %rdi, %rax
-    subq    $1, %rdi
-    cmpq    $1, %rdi
-    jg      .L2
-    rep; ret
 ```
 
 #### `while`
@@ -976,6 +1063,7 @@ while (test-expr)
 // 会被编译成
 
 // 1. jump to middle
+// 在 do-while 语句汇编代码的开头加上了 goto test
     goto test;
 loop:
     body-statement
@@ -983,8 +1071,22 @@ test:
     if (test-expr)
         goto loop;
 
-// 示例
+// 2. guarded-do
+// 在 do-while 语句汇编代码的开头加了一次 !test-expr 的判断
+// 当初始条件被认为恒真时，guarded-do 开头的条件检查可以被优化掉，少一次 goto，性能更好
+    if (!test-expr)
+        goto done;
+loop:
+    body-statement
+    if (test-expr)
+        goto loop;
+done:
+```
 
+优化等级较高时，gcc 会生成 guarded-do 的代码。
+
+```c
+// 示例
 long fact_while(long n) {
     long res = 1;
     while (n > 1) {
@@ -1007,32 +1109,6 @@ test:
     return res;
 }
 
-// x86asm
-n in %rdi
-fact_while:
-    movl    $1, %eax
-    jmp     .L5
-.L6:
-    imulq   %rdi, %rax
-    subq    $1, %rdi
-.L5:
-    cmpq    $1, %rdi
-    jg      .L6
-    rep; ret
-
-
-// 2. guarded-do
-    if (!test-expr)
-        goto done;
-loop:
-    body-statement
-    if (test-expr)
-        goto loop;
-done:
-// loop: 和 done: 之间的语句相当于 do-while 循环
-
-// 以上示例会变成：
-
 // x86asm-like c
 long fact_while_gd_goto(long n) {
     long res = 1;
@@ -1046,36 +1122,38 @@ loop:
 done:
     return res;
 }
-
-// x86asm
-n in %rdi
-fact_while:
-    cmpq    $1, %rdi
-    jle     .L7
-    movl    $1, %eax
-.L6:
-    imulq   %rdi, %rax
-    subq    $1, %rdi
-    cmpq    $1, %rdi
-    jne     .L6
-    rep; ret
-.L7:
-    movl    $1, %eax
-    ret
 ```
 
-gcc 采取 jump to middle 策略还是 guarded-do 策略取决于优化等级。
 
 #### `for`
 
 ```c
 for (init-expr; test-expr; update-expr)
     body-statement
-// 相当于
+// 一定程度上相当于
 init-expr;
 while (test-expr) {
     body-statement
     update-expr;
+}
+```
+
+`for` 和以上 `while` 转写的区别：
+
+```c
+for (init-expr; test-expr; update-expr) {
+    // ...
+    continue;
+    // ...
+}
+
+// 并不等价于
+init-expr;
+while (test-expr) {
+    // ...
+    continue;
+    // ...
+    update-expr;    // will be jumped over by continue! 
 }
 ```
 
@@ -1104,91 +1182,17 @@ loop:
 done:
 ```
 
-示例：阶乘函数
-
-```c
-long fact_for(long n) {
-    long res = 1;
-    for (long i = 2; i <= n; i++)
-        res *= i;
-    return res;
-}
-
-// x86asm-like c
-long fact_for_while(long n) {
-    long res = 1;
-    long i = 2;
-    while (i <= n) {
-        res *= i;
-        i++;
-    }
-    return res;
-
-// jump to middle
-long fact_for_jm_goto(long n) {
-    long res = 1;
-    long i = 2;
-    goto test;
-loop:
-    res *= i;
-    i++;
-test:
-    if (i <= n)
-        goto loop;
-    return res;
-}
-
-// x86-64 jump to middle
-n in %rdi
-fact_for:
-    movl    $1, %eax
-    movl    $2, %edx
-    jmp     .L8
-.L9:
-    imulq   %rdx, %rax
-    addq    $1, %rdx
-.L8:
-    cmpq    %rdi, %rdx
-    jle     .L9
-    rep; ret
-
-// guarded-do
-long fact_for_gd_goto(long n) {
-    long res = 1;
-    long i = 2;
-    if (i > n)
-        goto done;
-loop:
-    res *= i;
-    i++;
-    if (i <= n)
-        goto loop;
-done:
-    return res;
-}
-
-// x86-64 guarded-do
-n in %rdi
-fact_for:
-    movl    $1, %eax    ; res = 1
-    movl    $2, %edx    ; i = 2
-    cmpq    %rdi, %rdx
-    jg      .L11        ; if (i > n) goto done
-.L10:
-    imulq   %rdx, %rax  ; res *= i
-    addq    $1, %rdx    ; i++
-    cmpq    %rdi, %rdx
-    jle     .L10        ; if (i <= n) goto loop
-.L11:
-    rep; ret            ; return res
-```
-
 ### `switch`
 
-跳转表（jump table）是一个数组，表项 `i` 是*开关索引值为 `i` 时对应的*代码段的地址。和使用一大堆 `if-else` 语句相比，跳转表的优点是执行 `switch` 语句的用时与开关情况数量无关。
+跳转表（jump table）是一个数组，表项 `i` 是*开关索引值为 `i` 时对应的*代码段的地址。和使用一大堆 `if-else` 语句相比，**跳转表的优点是执行 `switch` 语句的用时与开关情况数量无关**，即它是 $O(1)$ 的。
+
+gcc 根据开关情况的数量和稀疏程度决定是否使用跳转表。开关情况较多、值的范围较密，gcc 就会使用跳转表。
 
 ```c
 // c 中的一个 switch 语句
+// 101 和 105 没有标号
+// 有的情况有多个标号：104, 106
+// 有的情况会 fall through：102
 void switch_eg(long x, long n, long* dest) {
     long val = x;
     switch (n) {
@@ -1211,36 +1215,43 @@ void switch_eg(long x, long n, long* dest) {
 }
 
 // x86asm-like c
+// Case 100: loc_A
+// Case 101: loc_def
+// Case 102: loc_B (Fall through)
+// Case 103: loc_C
+// Case 104: loc_D
+// Case 105: loc_def
+// Case 106: loc_D
 void switch_eg_impl(long x, long n, long* dest) {
     static void* jt[7] = {
         &&loc_A, &&loc_def, &&loc_B, &&loc_C,
         &&loc_D, &&loc_def, &&loc_D
-    };    // gcc 跳转表
+    };    // 跳转表，gcc 扩展语法
 
     unsigned long index = n - 100;
     long val;
 
     if (index > 6)
         goto loc_def;
-    // multiway branch
-    goto *jt[index];
 
-    loac_A:
-        val = x * 13;
-        goto done;
-    loc_B:
-        x += 10;
-        /* Fall through */
-    loc_C:
-        val = x + 11;
-        goto done;
-    loc_D:
-        val = x * x;
-        goto done;
-    loc_def:
-        val = 0;
-    done:
-        *dest = val;
+    goto *jt[index];    // computed goto, gcc 扩展语法
+
+loac_A:    /* Case 100 */
+    val = x * 13;
+    goto done;
+loc_B:     /* Case 102 */
+    x += 10;
+    /* Fall through */
+loc_C:     /* Case 103 */
+    val = x + 11;
+    goto done;
+loc_D:     /* Cases 104, 106 */
+    val = x * x;
+    goto done;
+loc_def:   /* Default case */
+    val = 0;
+done:
+    *dest = val;
 }
 
 // x86-64
@@ -1249,7 +1260,7 @@ switch_eg:
     subq    $100, %rsi
     cmpq    $6, %rsi
     ja      .L8
-    jmp     *.L4(,%rsi,8)  ; 8 表示每个表项占 8 字节
+    jmp     *.L4(,%rsi,8)  // 8 表示每个表项占 8 字节
 .L3:
     leaq    (%rdi,%rdi,2), %rax
     leaq    (%rdi,%rax,4), %rdi
@@ -1268,23 +1279,24 @@ switch_eg:
     movq    %rdi, (%rdx)
     ret
 
-; 跳转表
-    .section    .rodata    ; read-only data
-    .align 8       ; 8 字节对齐地址
+// 跳转表
+    .section    .rodata    // read-only data
+    .align 8       // 8 字节对齐地址
 .L4:
-    .quad   .L3    ; case 100: loc_A
-    .quad   .L8    ; case 101: loc_def
-    .quad   .L5    ; case 102: loc_B 
-    .quad   .L6    ; case 103: loc_C
-    .quad   .L7    ; case 104: loc_D
-    .quad   .L8    ; case 105: loc_def
-    .quad   .L7    ; case 106: loc_D
+    // 以下是 7 个四字 值为目标地址
+    .quad   .L3    // case 100: loc_A
+    .quad   .L8    // case 101: loc_def
+    .quad   .L5    // case 102: loc_B 
+    .quad   .L6    // case 103: loc_C
+    .quad   .L7    // case 104: loc_D
+    .quad   .L8    // case 105: loc_def
+    .quad   .L7    // case 106: loc_D
 ```
 
 ## 过程
 
 过程 P 调用过程 Q，Q 执行后返回到 P。这些动作包括以下机制：
-- 传递控制：进入 Q 时，PC 被更新为 Q 代码的起始地址。返回时，PC 被更新为调用 Q 指令的下一条指令的地址。
+- 传递控制：进入 Q 时，PC 被更新为 Q 代码的起始地址。返回时，PC 被更新为**返回地址**（调用 Q 指令的下一条指令的地址）。
 - 传递数据：参数和返回值的传递。
 - 分配和释放内存：Q 局部变量的分配和释放。
 
@@ -1294,11 +1306,15 @@ switch_eg:
 
 当 x86-64 过程所需的存储空间超出寄存器能够存放的大小时，就会在栈上分配空间。这一部分就是过程的**栈帧（stack frame）**。
 
-P 调用 Q 时，P 的返回地址被压入栈中，指明 Q 返回时应该继续执行 P 的哪条指令。Q 的代码会扩展当前栈，保存寄存器的值、分配局部变量的空间、为它调用的过程设置参数。多数过程的栈帧是**定长**的，在过程的开始被分配完毕。通过寄存器，P 可以传递最多 6 个整数值，但若 Q 需要更多的参数，P 可以在调用 Q 之前在自己的栈帧里存储好这些参数。
+P 调用 Q 时，P 的返回地址被压入栈中；Q 的代码会扩展当前栈，保存寄存器的值、分配局部变量的空间、为它调用的过程设置参数。多数过程的栈帧是**定长**的，在过程的开始被分配完毕。
+
+通过寄存器，P 可以传递最多 6 个整数值，但若 Q 需要更多的参数，P 可以在调用 Q 之前在自己的栈帧里存储好这些参数。
 
 为提高时空效率，x86-64 过程只分配需要的栈帧。例如，参数若少于或等于 6 个，那么就会用寄存器传递所有的参数。有的函数的所有变量都可以保存在寄存器，且不会调用任何其他函数，完全不需要栈帧。
 
 ### 转移控制
+
+# 间接过程调用
 
 | 指令 | 描述 |
 | --- | --- |
@@ -1313,9 +1329,12 @@ P 调用 Q 时，P 的返回地址被压入栈中，指明 Q 返回时应该继�
 
 ### 数据传送
 
-![传递函数参数的寄存器](images/传递函数参数的寄存器.png)
+参数按顺序依次存储在 `%rdi`、`%rsi`、`%rdx`、`%rcx`、`%r8` 和 `%r9` 中，它们都是调用者保存寄存器。
 
-如果函数有大于 6 个整数参数，那么**超出部分**就需要通过栈传递。第 7 个参数位于栈顶。**通过栈传递参数时，所有数据大小向 8 的倍数对齐**。参数到位后，即可执行 `call` 指令转移控制。
+如果函数有大于 6 个整数参数，那么**超出部分需要存储在调用者的栈帧中**。第 7 个参数位于栈顶。
+
+**通过栈传递参数时，所有数据大小向 8 的倍数对齐**（每个参数都占据 $8k$ 字节的空间）。
+
 
 ### 栈上的局部存储
 
@@ -1374,45 +1393,44 @@ long call_proc() {
 // x86-64
 long call_proc()
 call_proc:
-    ; 准备参数
+    // 准备参数
     subq    $32, %rsp
-    movq    $1, 24(%rsp)    ; store 1 in &x1
-    movl    $2, 20(%rsp)    ; store 2 in &x2
-    movw    $3, 18(%rsp)    ; store 3 in &x3
-    movb    $4, 17(%rsp)    ; store 4 in &x4
+    movq    $1, 24(%rsp)    // store 1 in &x1
+    movl    $2, 20(%rsp)    // store 2 in &x2
+    movw    $3, 18(%rsp)    // store 3 in &x3
+    movb    $4, 17(%rsp)    // store 4 in &x4
 
-    leaq    17(%rsp), %rax  ; create &x4
-    movq    %rax, 8(%rsp)   ; store &x4 as arg8
-    movl    $4, (%rsp)      ; store 4 as arg7
-    leaq    18(%rsp), %r9   ; pass &x3 as arg6
-    movl    $3, %r8d        ; pass 3 as arg5
-    leaq    20(%rsp), %rcx  ; pass &x2 as arg4
-    movl    $2, %edx        ; pass 2 as arg3
-    leaq    24(%rsp), %rsi  ; pass &x1 as arg2
-    movl    $1, %edi        ; pass 1 as arg1
+    leaq    17(%rsp), %rax  // create &x4
+    movq    %rax, 8(%rsp)   // store &x4 as arg8
+    movl    $4, (%rsp)      // store 4 as arg7
+    leaq    18(%rsp), %r9   // pass &x3 as arg6
+    movl    $3, %r8d        // pass 3 as arg5
+    leaq    20(%rsp), %rcx  // pass &x2 as arg4
+    movl    $2, %edx        // pass 2 as arg3
+    leaq    24(%rsp), %rsi  // pass &x1 as arg2
+    movl    $1, %edi        // pass 1 as arg1
 
     call    proc
 
-    ; 恢复内存
-    movslq  20(%rsp), %rdx  ; long(x2)
-    addq    24(%rsp), %rdx  ; x1 + x2
-    movswl  18(%rsp), %eax  ; int(x3)
-    movsbl  17(%rsp), %ecx  ; int(x4)
-    subl    %ecx, %eax      ; x3 - x4
-    cltq                    ; long(x3 - x4)
-    imulq   %rdx, %rax      ; (x1 + x2) * (x3 - x4)
-    addq    $32, %rsp       ; 释放栈帧
+    movslq  20(%rsp), %rdx  // long(x2)
+    addq    24(%rsp), %rdx  // x1 + x2
+    movswl  18(%rsp), %eax  // int(x3)
+    movsbl  17(%rsp), %ecx  // int(x4)
+    subl    %ecx, %eax      // x3 - x4
+    cltq                    // long(x3 - x4)
+    imulq   %rdx, %rax      // (x1 + x2) * (x3 - x4)
+    addq    $32, %rsp       // 释放栈帧
     ret
 ```
 
 
 ### 寄存器中的局部存储空间
 
-给定时刻只有一个过程是活动的，我们需要确保当调用者调用被调用者时，被调用者不会覆盖调用者稍后会使用的寄存器值。
+`%rbx`、`%rbp`、`%r12`、`%r13`、`%r14`、`%r15` 是**被调用者保存寄存器**。被调用者要么不改变这些寄存器的值，要么把他们的原始值压入栈中，然后在返回前恢复。
 
-根据惯例，寄存器 `%rbx`、`%rbp`、`%r12`、`%r13`、`%r14`、`%r15` 是**被调用者保存寄存器**。P 调用 Q 时，Q 必须保存这些寄存器的值，保证它们的值在返回后与调用前一样，即 Q 要么不改变这些寄存器的值，要么把他们的原始值压入栈中，然后在返回前恢复。依据此惯例，P 就可以安全地把值存在被调用者保存寄存器中。
+`%rax`、`%rdi`、`%rsi`、`%rdx`、`%rcx`、`%r8`、`%r9`、`%r10`、`%r11` 都是**调用者保存寄存器**。调用后，这些寄存器的值可能会被修改。
 
-所有其他寄存器，除了栈指针 `%rsp`，都是**调用者保存寄存器**。调用后，这些寄存器的值可能会被修改。
+`%rsp` 既不是被调用者保存寄存器，也不是调用者保存寄存器
 
 ```c
 long P(long x, long y) {
@@ -1442,32 +1460,6 @@ P:
 
 ### 递归过程
 
-```c
-long rfact(long n) {
-    long res;
-    if (n <= 1)
-        res = 1;
-    else
-        res = n * rfact(n - 1);
-    return res;
-}
-
-// x86-64
-n in %rdi
-rfact:
-    pushq   %rbx
-    movq    %rdi, %rbx
-    movl    $1, %eax
-    cmpq    $1, %rdi
-    jle     .L35
-    leaq    -1(%rdi), %rdi
-    call    rfact
-    imulq   %rbx, %rax
-.L35:
-    popq    %rbx
-    ret
-```
-
 ## 数组分配和访问
 
 x86-64 的内存引用指令可以简化数组访问。例如：
@@ -1478,24 +1470,28 @@ int i = 2;    // i in %rcx
 E[i];         // (%rdx, %rcx, 4)
 ```
 
-C 允许指针运算。`ptr + 1` 相当于 `&(ptr[1])`， `ptr0 - ptr1` 结果的类型为 `long`。
+`ptr + 1` 相当于 `&(ptr[1])`， `ptr0 - ptr1` 结果的类型为 `long`。
 
 ```c
 int a[5][3];         // a in %rdi
 int i = 2, j = 1;    // i in %rsi, j in %rdx
 a[i][j];             // a + 4 * (3 * i + j)
 
-// leaq    (%rsi, %rsi, 2), %rax    ; 3 * i
-// leaq    (%rdi, %rax, 4), %rax    ; a + 4 * (3 * i)
-// movl    (%rax, %rdx, 4), %eax    ; a + 12 * i + 4 * j
+// leaq    (%rsi, %rsi, 2), %rax     3 * i
+// leaq    (%rdi, %rax, 4), %rax     a + 4 * (3 * i)
+// movl    (%rax, %rdx, 4), %eax     a + 12 * i + 4 * j
 ```
 
-编译器对定长数组常常有优化。
+编译器对定长多维数组常常有优化，体现在**将重复的二维数组地址计算转化为指针解引用**，即将 `B[j][k]` 优化为 `*Bptr`，将 `j++` 优化为 `Bptr += N`。
+
+一维数组地址计算（`leaq (arr, index, 4), dest; addq $1, index`）不必优化为指针解引用（`movq (ptr), dest; addq $4, ptr`），这对性能影响不大。
 
 ```c
+// -O1
 #define N = 16;
 typedef int fix_mat[N][N];
 
+// A's ith row times B's jth column
 int fix_prod_ele (fix_mat A, fix_mat B, long i, long k) {
     long j;
     int res = 0;
@@ -1505,6 +1501,7 @@ int fix_prod_ele (fix_mat A, fix_mat B, long i, long k) {
     return res;
 }
 
+// 编译器会自动优化成：
 int fix_prod_ele_opt(fix_mat A, fix_mat B, long i, long k) {
     int* Aptr = &A[i][0];
     int* Bptr = &B[0][k];
@@ -1521,20 +1518,20 @@ int fix_prod_ele_opt(fix_mat A, fix_mat B, long i, long k) {
 // x86-64
 A in %rdi, B in %rsi, i in %rdx, k in %rcx
 fix_prod_ele:
-    salq    $6, %rdx                  ; i * 64
-    addq    %rdx, %rdi                ; Aptr = A + i * 64 = &A[i][0]
-    leaq    (%rsi, %rcx, 4), %rcx     ; Bptr = B + k * 4 = &B[0][k]
-    leaq    1024(%rcx), %rsi          ; Bend = B + k * 4 + 1024 = &B[N][k]
-    movl    $0, %eax                  ; res = 0
+    salq    $6, %rdx                  // i * 64 (16 * 4)
+    addq    %rdx, %rdi                // Aptr = A + i * 64 = &A[i][0]
+    leaq    (%rsi, %rcx, 4), %rcx     // Bptr = B + k * 4 = &B[0][k]
+    leaq    1024(%rcx), %rsi          // Bend = B + k * 4 + 1024 = &B[N][k]
+    movl    $0, %eax                  // res = 0
 .L7:
-    movl    (%rdi), %edx              ; *Aptr
-    imull   (%rcx), %edx              ; *Aptr * *Bptr
-    addl    %edx, %eax                ; res += *Aptr * *Bptr
-    addq    $4, %rdi                  ; Aptr++
-    addq    $64, %rcx                 ; Bptr += N
+    movl    (%rdi), %edx              // *Aptr
+    imull   (%rcx), %edx              // *Aptr * *Bptr
+    addl    %edx, %eax                // res += *Aptr * *Bptr
+    addq    $4, %rdi                  // Aptr++
+    addq    $64, %rcx                 // Bptr += N
     cmpq    %rsi, %rcx                
-    jne     .L7                       ; Bptr != Bend
-    rep; ret
+    jne     .L7                       // Bptr != Bend
+    rep// ret
 ```
 
 C99 引入了变长数组。
@@ -1553,32 +1550,47 @@ var_ele:
     ret
 ``` 
 
-由于必须使用乘法指令将 `i` 伸缩 `n` 倍，因此变长数组的性能可能一般。
+对于定长数组，`n` 是一个常数，可以通过 `salq` 和 `leaq` 等指令计算 `i * n`；而变长数组必须使用 `imultq` 计算，因此变长数组的性能可能一般。
 
-不过，在循环中引用变长数组时，编译器往往可以根据访问模式的规律来优化索引的计算（即可以把数组引用优化成指针间接引用，从而**避免直接数组引用导致的乘法**）。
+不过，在循环中引用变长数组时，编译器往往可以识别出程序访问多维数组的步长，从而优化索引的计算（即可以把二维数组引用优化成指针间接引用，从而**避免直接数组引用导致的乘法**）。
+
+```c
+int var_prod_ele_opt(long n, int A[n][n], int B[n][n], long i, long k) {
+    int* Arow = A[i];
+    int* Bptr = &B[0][k];
+    int res = 0;
+    for (j = 0; j < n; j++) {
+        res += Arow[j] * *Bptr;  // 将二维数组引用优化为指针解引用
+        Bptr += n;
+    }
+}
+```
+
 
 
 ## 结构体和联合
 
-编译器维护关于结构体的信息，结构体的所有组成部分存放在一段连续的内存里。
+编译器维护关于结构体的类型信息，指示每个字段的字节偏移，结构体的所有组成部分存放在一段连续的内存里。
 
-联合体用不同的字段引用相同的内存块。联合体所有字段的偏移量都是 0，它们重叠地放在同一块内存中。联合体的总大小等于它最大字段的大小。
+联合体用不同的字段引用相同的内存块，绕过了 C 的类型限制。联合体所有字段的偏移量都是 0，它们重叠地放在同一块内存中。**联合体的总大小等于它最大字段的大小**。
 
-某种二叉树每个叶子节点都存放一个 `double[2]`；每个内部节点存放两个指向孩子节点的指针，但不存放数据。即数据字段和指针字段的使用是**互斥**的。那么就可以用联合体定义：
+例如，某种二叉树每个叶子节点都存放一个 `double[2]`；每个内部节点存放两个指向子节点的指针，但不存放数据。即数据字段和指针字段的使用是**互斥**的。那么就可以用联合体定义：
 
 ```c
 typedef enum { N_LEAF, N_INTERNAL } nodetype_t;
 
-struct node_s {
-    nodetype_t type;    // tag
+typedef struct node_t {
+    nodetype_t type;  // tag
     union {
         struct {
-            union node_s* left;
-            union node_s* right;
+            struct node_t* left;
+            struct node_t* right;
         } internal;
         double data[2];
     } info;
-};
+} node_t;
+// 4 + 4 + 8 * 2 = 24 Bytes
+// 和给代码造成的麻烦比起来 并没有节省什么空间
 ```
 
 联合体还可以用来**访问不同数据类型的位模式**。
@@ -1596,13 +1608,18 @@ unsigned long double2bits(double d) {
 // 如果使用 union 实现数据的拼接，那么就需要注意大端法和小端法的问题
 ```
 
+### 数据对齐
+
 **数据对齐**：一些计算机系统对基本数据类型的合法地址做出了限制，要求某种类型对象的地址必须是某个 `K` 的倍数。
+
+例如，如果处理器总是一次性从内存读取 8 个字节，那么为了能够一次性读出一个 `double`，就需要要求这个 `double` 的地址是 8 的倍数。
 
 无论数据是否对齐，x86-64 硬件都能正确工作。
 
 对齐原则：**`K` 字节的基本对象的地址必须是 `K` 的倍数**。
 
 汇编中，`.align 8` 可以保证其后面的数据的起始地址是 8 的倍数。
+
 
 ```c
 struct S1 {
@@ -1612,8 +1629,11 @@ struct S1 {
 };
 // 编译器会在 i 和 c 之间填充 3 个字节，从而保证 j 满足 4 字节对齐
 // 整个结构体的大小就会变成 12 字节
-struct S1* p;    // p 的值必须 4 字节对齐 从而保证 p->i p->c p->j 是对齐的
+
+struct S1* p;    // p 的值就是它指向的结构体的地址，它必须 4 字节对齐，从而保证 p->i p->c p->j 是对齐的
 ```
+
+编译器还可能在结构体的末尾填充空字节，以保证结构体数组的每个元素是对齐的。
 
 ```c
 struct S2 {
@@ -1621,11 +1641,13 @@ struct S2 {
     int j;
     char c;
 }; 
+// 对于单个 S2 对象来说，只要 S2 的地址是 4 字节对齐的，那么其元素就都会是对齐的
+// 然而如果 S2 对象组成数组，那么数组的其他 S2 对象可能不是对齐的
 // 编译器会在 c 之后填充 3 个字节，以保证 S2 的数组的元素是数据对齐的
 ```
 
 - `struct P1 { int i; char c; int j; char d; };`：4 + 4 + 4 + 4 = 16 字节，结构体自身 4 字节对齐
-- `struct P2 { short w[3]; char c[3]; };`：6 + 3 + 1 = 110 字节，结构体自身 2 字节对齐
+- `struct P2 { short w[3]; char c[3]; };`：6 + 3 + 1 = 10 字节，结构体自身 2 字节对齐
 - `struct P3 { short w[5]; char* c[3]; };`：10 + 6 + 24 = 40 字节，结构体自身 8 字节对齐
 
 ```c
@@ -1643,6 +1665,9 @@ struct {
 // 重排字段顺序为 a c g e h b d f，则总大小变成 8 + 8 + 8 + 4 + 4 + 2 + 1 + 1+4 = 40 字节
 // （字段按大小递减放置 结尾补 4 字节）
 ```
+
+> 如果数据没有对齐，某些 Intel 和 AMD 处理器的 SSE 指令可能无法正确执行（这些指令要求操作数必须 16 字节对齐）。于是编译器和运行时系统需要保证，可能被 SSE 指令使用的数据必须是 16 字节对齐的，即：内存分配函数（`alloca` `malloc` `calloc` `realloc`）生成的块的起始地址必须是 16 的倍数；多数函数栈帧的边界必须是 16 字节的倍数（有例外）。较新的 AVX 指令是 SSE 的超集，且不需要强制对齐
+
 
 ## 将控制与数据结合起来
 
@@ -1686,9 +1711,11 @@ echo:
 
 ### 栈随机化
 
-**栈随机化**：攻击者需要在字符串中插入攻击代码和执行攻击代码的指针。而产生这个指针需要知道这个字符串放置的栈地址。栈随机化使得**栈的位置在程序每次运行时都有变化**。实现方法是**程序开始时，在栈上分配一段 0 ~ n 字节内随机大小的空间**。
+**栈随机化**：攻击者需要在字符串中插入攻击代码和执行攻击代码的指针。而产生这个指针需要知道这个字符串放置的栈地址。栈随机化使得**栈的位置在程序每次运行时都有变化**。
 
-Linux 中，栈随机化是标准行为，它是更大的技术**地址空间布局随机化（Address-Space Layout Randomization）**的一部分。采用 ASLR，每次运行时程序的不同部分（程序代码、库代码、栈、全局变量、堆数据）都会被加载到内存的不同区域。
+栈随机化的实现方法：**程序开始时，在栈上分配一段 0 ~ n 字节内随机大小的空间**。这段空间不被使用，仅用于改变程序每次执行时后续的栈的地址。
+
+Linux 中，栈随机化是标准行为，它是更大的技术**地址空间布局随机化（Address-Space Layout Randomization, ASLR）**的一部分。采用 ASLR，每次运行时程序的不同部分（程序代码、库代码、栈、全局变量、堆数据）都会被加载到内存的不同区域。
 
 栈随机化以及其他 ASLR 技术保证了同样的程序运行在不同机器上，地址映射会大相径庭，从而预防了一些攻击。
 
@@ -1729,17 +1756,21 @@ echo:
 
 `%fs:40` 指明金丝雀值是用**段寻址（segmented addressing）**从内存中读入的。金丝雀值被存放在一个特殊的**只读**段中，不会被攻击者覆盖。在**恢复寄存器状态和函数返回之前**，程序会检查金丝雀值是否被修改，如果是，则调用一个错误处理例程。
 
+gcc 只在函数有局部 `char` 类型缓冲区时插入金丝雀值检测。
+
 
 ### 限制可执行代码区域
 
 典型程序中，只有保存编译器产生的代码的内存才需要是可执行的，其他部分可以被限制为只允许读和写。以前的 x86 体系结构将读和执行访问控制合并成一个 1 位的标志，即可读的页也是可执行的。栈必须可读且可写，因而是可执行的。虽然有能够限制一些页可读但不可执行的机制，但性能较差。
 
-最近的处理器引入了 **NX（No-Execute）**位，将读和执行访问模式分开，栈可以被标记被可读、可写但不可执行的，性能上也没有损失。
+最近的 AMD 处理器引入了 **NX（No-Execute）**位，将读和执行访问模式分开，栈可以被标记被可读、可写但不可执行的，性能上也没有损失。
 
 
 ### 变长栈帧
 
 当函数调用 `alloca` 或声明局部变长数组时，我们会需要实现变长栈帧。
+
+变长栈帧的一大麻烦是对齐。
 
 ```c
 long vframe(long n, long idx, long* q) {
@@ -1757,21 +1788,25 @@ n in rdi, idx in rsi, q in rdx
 vframe:
     pushq   %rbp
     movq    %rsp, %rbp            // set frame ptr
+
     subq    $16, %rsp
     leaq    22(, %rdi, 8), %rax
-    andq    $-16, %rax            // round to nearest lower 16
+    andq    $-16, %rax            // round to nearest lower 16, -16 == 0b1111 1111 1111 0000
     subq    %rax, %rsp            // allocate for p
+
     leaq    7(%rsp), %rax
     shrq    $3, %rax              
-    leaq    0(, %rax, 8), %r8     // round to nearest higher 8
-    movq    %r8, %rcx
+    leaq    0(, %rax, 8), %r8     
+    movq    %r8, %rcx            // round to nearest higher 8, rcx = p
+
+// ...
 
 // Code for initializing p
 i in rax and on stack, n in rdi, p in rcx, q in rdx
 .L3:
     movq    %rdx, (%rcx, %rax, 8)          // p[i] = q
     addq    $1, %rax
-    movq    %rax, -8(%rbp)                  // store on stack
+    movq    %rax, -8(%rbp)                  // store i on stack
 .L2:
     movq    -8(%rbp), %rax                  // load i
     cmpq    %rdi, %rax
@@ -1788,7 +1823,7 @@ i in rax and on stack, n in rdi, p in rcx, q in rdx
 
 寄存器 `%rbq` 作为**帧指针（frame pointer）**或**基指针（base pointer）**管理变长栈帧。由于 `%rbq` 是**被调用者保存寄存器**，代码必须先将 `%rbq` 的值保存在栈中，然后执行 `mov %rsp, %rbp`。之后不再改变 `%rbp` 的值。用固定长度的局部变量（例如 `i`）相对于 `%rbq` 的偏移量来访问它们。
 
-`leave` 指令将帧指针恢复到原始值，释放整个栈帧。它相当于 `movq %rbp, %rsp; popq %rbp`。
+`leave` 指令将帧指针恢复到原始值，释放整个栈帧。执行它如同执行 `movq %rbp, %rsp; popq %rbp`。
 
 注意第一部分代码的数据对齐。`s2 - s1` 被**向下舍入到最近的 16 的倍数**，而 **`p` 的起始地址被向上舍入到最近的 8 的倍数**。
 
@@ -3916,4 +3951,310 @@ float dotprod(float x[8], float y[8]) {
 **写策略**：直写容易实现，且可以使用独立于高速缓存的**写缓冲区（write buffer）**。写回引起的传送较少，允许更多的到内存的带宽用于执行 DMA 的 I/O 设备。层次结构越低，传送时间越长，减少传送数量越重要，越多采用写回
 
 ## 编写高速缓存友好的代码
+
+- 让最常见的情况运行得快。优化瓶颈，忽略不重要的部分
+- 减小循环内部的不命中数量：对局部变量的反复引用是好的，步长为 1 的引用模式是好的
+- 行引用二维数组，而不是列
+
+
+## 综合：高速缓存对程序性能的影响
+
+### 存储器山
+
+读吞吐量（read throughput），又称读带宽（read bandwidth），是程序从存储系统中读数据的速率，以 MB/s 为单位
+
+```c
+long data[MAXELES];  // global array we'll be traversing
+
+int test(int elems, int stride) {
+    long i, sx2 = stride * 2, sx3 = stride * 3, sx4 = stride * 4;
+    long acc0 = 0, acc1 = 0, acc2 = 0, acc3 = 0;
+    long length = elems;
+    long limit = length - sx4;
+
+    for (i = 0; i < limit; i += sx4) {
+        acc0 = acc0 + data[i];
+        acc1 = acc1 + data[i + stride];
+        acc2 = acc2 + data[i + sx2];
+        acc3 = acc3 + data[i + sx3];
+    }
+    for (; i < length; i += stride) {
+        acc0 = acc0 + data[i];
+    }
+    return ((acc0 + acc1) + (acc2 + acc3));
+}
+
+// return read throughput (MB/s)
+// size = total array size (in bytes)
+// stride in array elements
+// Mhz = clock frequency in Mhz
+double run(int size, int stride, double Mhz) {
+    double cycles;
+    int elems = size / sizeof(double);
+    test(elems, stride);
+    cycles = fcyc2(test, elems, stride, 0);
+    return (size / stride) / (cycles / Mhz);
+}
+```
+
+`test` 函数以步长 `stride` 扫描数组的头 `elems` 个元素产生读序列，使用 $4\times 4$ 循环展开；`run` 函数运行 `test` 函数，返回读吞吐量。`run` 函数第三行调用 `test` 是对高速缓存的预热，`fcyc3` 以 CPU 周期为单位测量 `test` 在参数 `elems` 和 `stride` 下的运行时间。
+
+`size` 参数越小，时间局部性越好；`stride` 参数越小，空间局部性越好。以不同的参数调用 `run` 可以得到一个读带宽的时间和空间局部性的二维函数，称为**存储器山（memory mountain）**。
+
+![](images/6-41-存储器山.png)
+
+垂直于数组大小轴的是四条山脊，分别对应于工作集完全在 L1 高速缓存、L2 高速缓存、L3 高速缓存和主存内的时间局部性区域。L1 山脊的最高点（14 GB/s）与主存山脊的最低点（900 MB/s）之间的差别有一个数量级。
+
+在 L2、L3 和主存山脊上，随着步长的增加，有一个空间局部性的下降斜坡。即使当工作集很大、无法装进任何一个高速缓存时，主存山脊的最高点也比最低点高 8 倍。因此，即使程序的时间局部性很差，空间局部性仍然能补救。
+
+步长为 1 时，有一条读吞吐量保持在 12 GB/s 的平坦的山脊线，即使工作集超出了 L1 和 L2 的大小。这是由于 Core i7 存储器系统的硬件**预取（prefetching）**机制。预取机制自动地识别顺序的、步长为 1 的引用模式，试图在一些块被访问之前就将它们取到高速缓存里。
+
+![](images/6-42-步长固定.png)
+
+![](images/6-43-大小固定.png)
+
+大小固定时，随着步长增加，L2 读不命中次数的比例增加；一旦步长达到了 8 个字（i.e. 达到了块的大小），则 L2 每次读请求都不命中，于是读吞吐量速率变为常数。
+
+### 重新排列循环以提高空间局部性
+
+假设：
+- 每个数组的类型是 `double[n][n]` 且 `siezeof(double) == 8`
+- 只有一个块大小为 32 字节的高速缓存
+- 数组大小 `n` 很大，以至于矩阵的一行不能完全装入高速缓存
+- 编译器将局部变量存储到寄存器中
+
+![](images/6-44-45-矩阵乘法循环.png)
+
+6 个版本形成了 3 个等价类。`ijk` 和 `jik` 都是类 AB 的成员，因为它们在最内层的循环里引用的都是矩阵 A 和 B。
+
+![](images/6-46-i7矩阵乘法性能.png)
+
+最快的版本比最慢的版本快几乎 40 倍；与内存访问总数相比，不命中率是一个更好的性能预测指标；由于采用了步长为 1 的访问模式，其性能在 `n` 值超出高速缓存容量后仍能保持不变
+
+
+# 链接
+
+链接可以执行于编译时（compile time）、加载时（load time）或运行时（run time）。
+
+## 编译器驱动程序
+
+`cpp` 是预处理器，将 `main.c` 源代码翻译成一个 ASCII 码的中间文件 `main.i`。此后，C 编译器 `cc1` 将 `main.i` 编译为 ASCII 汇编文件 `main.s`。之后，汇编器 `as` 将 `main.s` 翻译成**可重定位目标文件（relocatable object file）** `main.o`。最后，链接器 `ld` 将 `main.o` 和其他必要的系统目标文件合并成一个可执行目标文件（executable object file） `main`。
+
+当运行 `main` 时，`shell` 调用操作系统中的**加载器（loader）**函数，将 `main` 的代码和数据复制到内存，并将控制转移到程序的开头。
+
+## 静态链接
+
+Linux LD 就是静态链接器（static linker），它以一组*可重定位目标文件*和命令行参数作为输入，生成一个完全链接的、可以加载和运行的可执行目标文件作为输出。输入的可重定位目标文件由各种不同的代码和数据节（section）组成。
+
+链接器的主要任务是
+- **符号解析（symbol resolution）**：将每个符号（对应一个函数、全局变量或静态变量）引用（symbol reference）与一个符号定义（symbol definition）关联起来
+- **重定位（relocation）**：将每个符号定义与一个内存位置关联起来，以重定位这些节，然后修改所有对这些符号引用，令它们指向这个内存位置。链接器使用汇编器产生的**重定位条目（relocation entry）**的详细指令，不加甄别地执行重定位。
+
+## 目标文件
+
+目标文件有三种：
+- **可重定位目标文件**：包含二进制代码和数据，其形式可以在编译时与其他可重定位目标文件合并起来，创建一个可执行目标文件
+- **可执行目标文件**：包含二进制代码和数据，可以直接复制到内存并执行
+- **共享目标文件**：一种特殊的可重定位目标文件，可以在加载或运行时被动态加载进内存并链接
+
+编译器和汇编器可以生成可重定位目标文件和共享目标文件。
+
+一个**目标模块（object module）**就是一个字节序列，一个**目标文件（object file）**就是一个目标模块的文件。
+
+目标文件格式，第一个 Unix 系统使用 `a.out` 格式，Windows 使用可移植可执行（Portable Executable, PE）格式，MacOS-X 使用 Mach-O 格式，现代 x86-64 Linux 和 Unix 使用**可执行可链接格式（Executable and Linkable Format, ELF）**。
+
+## 可重定位目标文件
+
+![](images/7-3典型ELF格式.png)
+
+ELF 头（ELF header）先以 16 字节序列描述系统的字大小、字节顺序。剩下的内容包括 ELF 头的大小、目标文件类型、机器类型（如 x86-64）、节头部表（section header table）的文件偏移、节头部表中的条目数和条目大小。
+
+节头部表中的每个条目（entry）大小固定，描述不同节的位置和大小。
+
+以下是典型的 ELF 文件的节：
+- `.text`：已编译程序的机器代码
+- `.rodata`：只读数据，如字符串常量、`switch` 跳转表
+- `.data`：已初始化的全局和静态 C 变量
+- `.bss`：未初始化的全局和静态 C 变量，以及所有被零初始化的全局和静态变量。它不占用实际空间。区分 `.data` 和 `.bss` 的意义是节省磁盘空间，运行时在内存中分配这些变量，并初始化为零
+- `.symtab`：符号表，包含程序中定义和引用的函数和全局变量的信息。不使用 `-g` 编译选项也能得到符号表，除非用 STRIP 命令去掉它。和编译器中的符号表不同，`.symtab` 不包含局部变量的条目
+- `.rel.text`：`.text` 节中位置的列表。当链接器将这个目标文件与其他文件组合时，需要修改这些位置。一般而言，调用外部函数或引用全局变量的指令需要修改，而调用本地函数的指令不需要。可执行目标文件中不需要重定位信息，因此通常省略，除非显式指定。
+- `.rel.data`：被模块引用或定义的所有全局变量的重定位信息。任何已初始化的全局变量，若其初始值是一个全局变量地址或外部定义函数的地址，那么就需要被修改
+- `.debug`：调试符号表。条目是程序中定义的局部变量和类型定义、程序中定义和引用的全局变量以及原始 C 源代码。只有在使用 `-g` 编译选项时才会出现。
+- `.line`：原始 C 代码中的行号和 `.text` 节机器指令的映射。只有在使用 `-g` 编译选项时才会出现。
+- `.strtab`：字符串表。内容包括 `.symtab` 和 `.debug` 节中的符号表，以及节头部表中的节名。是以 `null` 结尾的字符串序列。
+
+> `.bss` 得名于 IBM 704 汇编中“块存储开始（Block Storage Start）”指令。助记：Better Save Space
+
+## 符号和符号表
+
+声明是向代码中引入名字的语法。这些名字可以声明在**命名空间作用域（全局作用域）**、**类作用域**和**复合语句（块）作用域**中。
+
+```c++
+int a;          // 命名空间作用域
+struct A {
+    int b();    // 类作用域
+};
+int main() {    // 命名空间作用域
+    int c;      // 复合语句作用域
+}
+```
+
+每个名字具有一个称为**连接**的属性，连接有三种：**外部连接（external linkage）**、**内部连接（internal linkage）**和**无连接（no linkage）**。
+
+所有复合语句作用域的声明都是无连接的。无连接的名字由于作用域限制，自然不会影响链接过程。内部连接的名字是每个翻译单元独有的，与其他翻译单元中的同名符号互不干扰。外部连接的名字是所有翻译单元共享的。
+
+称带有内部连接或外部连接的函数名和变量名为**符号（symbol）**。
+
+1. 类型（类、枚举类型、别名）总是外部连接的
+2. 默认情形下，符号是外部连接的
+3. 用 `static` 修饰一个符号，可以让它成为内部连接的；用 `extern` 修饰一个符号，可以让它成为外部连接的
+
+
+`.symtab` 符号表包括符号，不包含无连接的名字。
+
+
+编译器为静态变量的定义在 `.data` 或 `.bss` 中分配空间，并在符号表中创建一个有唯一名字的本地链接器符号（比如，如果函数 `f` 和 `g` 中都定义了 `static int x = 0;`，那么这两个 `x` 变量会被编译器向汇编器输出为不同名字的局部链接器符号，以实现内部连接）。
+
+
+符号表由汇编器构造，使用编译器输出到 `.s` 文件中的符号。`.symtab` 节包含的 ELF 符号表包含一个条目数组，条目格式如下：
+
+```c
+typedef struct {
+    int name;            // String table offset
+    char type: 4,        // Function / Data, 4 bits
+         binding: 4;     // Local / Global, 4 bits
+    char reserved;       // Unused
+    short section;       // Section header index
+    long value;          // Section offset / Absolute address
+    long size;           // Object size in bytes
+} Elf64_Symbol;
+```
+
+`name` 是字符串表中的字节偏移，指向该符号的 `null` 结尾的字符串名字。`value` 是符号地址，对于可重定位模块，是**距离定义目标的节的起始位置的偏移**；对于可执行目标文件，是**绝对运行时地址**。符号表除了函数和数据以外，还可以包含各个节的条目，以及对应原始源文件的路径名的条目，因此这些目标的类型也有所不同。
+
+每个符号被分配到目标文件的某个节，由 `section` 字段指示。`section` 字段是一个到节头部表的索引。
+
+在**可重定位目标文件**有三个**伪节（pseudosection）**，它们在节头部表中没有条目：
+- ABS 代表不该被重定位的符号
+- UNDEF 代表未定义的符号，即在本目标模块被引用，但在其他地方被定义的符号
+- COMMON 代表还未被分配位置的未初始化的数据目标。对于此目标，`value` 字段给出对齐要求，而 `size` 给出最小大小
+
+可执行目标文件中没有以上伪节。
+
+现代 gcc 将可重定位目标文件中**未初始化的全局变量**分配到 COMMON 节，将**未初始化的静态变量**和**零初始化的全局或静态变量**分配到 `.bss` 节。
+
+可以用 GNU `readelf` 程序查看目标文件内容。
+
+```bash
+Num:       Value      Size Type   Bind   Vis      Ndx Name
+  8: 0000000000000000   24 FUNC   GLOBAL DEFAULT    1 main
+  9: 0000000000000000    8 OBJECT GLOBAL DEFAULT    3 array
+ 10: 0000000000000000    0 NOTYPE GLOBAL DEFAULT  UND sum
+# Ndx=1 表示 .text，Ndx=3 表示 .data
+```
+
+```c
+// m.c
+void swap();
+
+int buf[2] = {1, 2};
+
+int main() {
+    swap();
+}
+
+// swap.c
+// 在 swap.o 模块的 .symtab 节中
+extern int buf[];        // 外部 属于节 .data
+
+int* bufp0 = &buf[0];    // 全局 属于节 .data
+int* bufp1;              // 全局 属于节 COMMON
+
+void swap() {            // 全局 属于节 .text
+    int temp;    // temp 不出现在符号表
+    // ...
+}
+```
+
+## 符号解析
+
+链接器将每个引用与它参数中的可重定位目标文件的符号表中的一个确定的符号定义关联起来。
+
+对于引用和定义在同一模块中的局部符号，符号解析是简单的。编译器只允许每个模块中每个局部符号有一个定义。对于局部静态变量，编译器需要保证它们本地链接器符号唯一。
+
+当编译器遇到一个未在当前模块定义的全局符号时，会假设它是在其他某个模块中定义的，生成一个链接器符号表条目，并将它交给链接器处理。若链接器在它的任何输入模块中都找不到该符号的定义，就输出一条错误信息并终止。
+
+### 链接器如何解析多重定义的全局符号
+
+单一定义原则（One Definition Rule, ODR）：
+- 一个翻译单元中，允许出现一个变量、函数或类型的多次声明，但至多只允许出现一次定义
+- 一个翻译单元中，如果 *ODR-使用*了一个符号，那么它至少要出现一次定义
+- 整个程序中，非内联的符号最多只允许出现一次定义
+
+忘记写 `main` 函数不会报编译错误，而是链接错误：`main` 函数被 ODR-使用，但找不到定义。
+
+```c++
+// a.cpp
+inline void f() {
+    // ...
+}
+
+// b.cpp
+inline void f() {
+    // ...
+}
+
+// 此例中，f 是内联的，因此可以在两个翻译单元中重复定义
+// 这两个定义必须完全一致，否则是未定义行为
+```
+
+如下的不带 `static` 或 `extern` 的全局变量声明在 C++ 中是变量 `a` 的定义，且 `a` 是外部连接的。
+
+但在 C 中，这样的声明称为**试探性定义（tentative definition）**。
+
+```c
+int a;
+```
+
+当试探性定义与一个同名的“正常定义”**同时出现**时，试探性定义成为声明。否则，这些试探性定义中的某一个成为定义，其余成为声明。
+
+> 在标准中，“同时出现”的范围是同一个翻译单元。在某些实现（如 Linux 的 ELF 格式）中，这个范围可以是多个翻译单元。在此情况下，称“正常定义”的符号为**强符号**，试探性定义的符号为**弱符号**。
+
+汇编器将符号强弱的信息隐含地编码在可重定位目标文件的符号表。
+
+- 在链接时，强符号只能出现一次（对应单一定义原则）
+- 多个弱符号可伴随一个强符号同时链接（弱符号——试探性定义——退化为声明）
+- 没有强符号时，在多个弱符号中任选一个成为定义。
+
+```c
+// foo.c
+#include <stdio.h>
+void f(void);
+
+int y = 15212;
+int x = 15213;
+
+int main() {
+    f();
+    printf("x = 0x%x y = 0x%x\n", x, y);
+}
+
+// bar.c
+double x;
+
+void f() {
+    x = -0.0;
+}
+```
+
+在 x86-64/Linux 机器上，`f()` 将会用 `0.0` 覆盖 `foo.c` 中的 `x` 和 `y` 变量，并触发链接器发出一条 Warning: alignment 4 of symbol 'x' in somefile.o is smaller than 8 in otherfile.o。可以用 `-fno-common` 调用 gcc，将未初始化的全局变量放在 `.bss` 节，从而禁止了链接器对试探性定义的合并，使得链接器在遇到此类情况时报重定义错误（这已经成为默认选项）。`-Werror` 可以把所有警告变为错误。
+
+我们已经知道，现代 gcc 将试探性定义的全局变量分配到 COMMON 节，以让链接器选择成为定义的声明；将“普通定义”为零初始化的变量（即未显式初始化的静态变量、零初始化的全局和静态变量）分配到 `.bss` 节。对于初始化为非零值的全局或静态变量，gcc 将它们分配到 `.data` 节。
+
+
+### 与静态库链接
+
+
+
+
 
