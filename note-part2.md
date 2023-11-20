@@ -77,6 +77,20 @@
   - [非本地跳转](#非本地跳转)
   - [操作进程的工具](#操作进程的工具)
 - [虚拟内存](#虚拟内存)
+- [系统级 I/O](#系统级-io)
+  - [Unix I/O](#unix-io)
+  - [文件](#文件)
+  - [打开和关闭文件](#打开和关闭文件)
+  - [读和写文件](#读和写文件)
+  - [用 RIO 包健壮地读写](#用-rio-包健壮地读写)
+    - [RIO 的无缓冲的输入输出函数](#rio-的无缓冲的输入输出函数)
+    - [RIO 的带缓冲的输入函数](#rio-的带缓冲的输入函数)
+  - [读取文件元数据](#读取文件元数据)
+  - [读取目录内容](#读取目录内容)
+  - [共享文件](#共享文件)
+  - [I/O 重定向](#io-重定向)
+  - [标准 I/O](#标准-io)
+  - [我该使用哪些 I/O 函数？](#我该使用哪些-io-函数)
 
 # 链接
 
@@ -2456,3 +2470,485 @@ int main() {
 
 # 虚拟内存
 
+# 系统级 I/O
+
+I/O 是在主存和外部设备（磁盘驱动、终端、网络）之间复制数据的过程。
+
+## Unix I/O
+
+一个 Linux **文件**是一个 $m$ 字节的序列，一切 I/O 设备都被视为文件，而所有的 I/O 操作都被视为对文件的读和写。这种优雅的映射使得 Linux kernel 可以提供一个简单且底层的应用程序接口，称为 Unix I/O。
+
+**打开文件**：应用程序通过要求内核打开相应的文件来宣告它想要访问某个 I/O 设备。内核返回一个**文件描述符**（file descriptor），它是**非负整数**。文件描述符标识此文件。内核维护有关此已打开文件的所有信息，应用程序只需要保存文件描述符
+
+Linux shell 创建的每个进程，在开始时都有三个已打开的文件：
+
+- 标准输入（standard input）：文件描述符为 0
+- 标准输出（standard output）：文件描述符为 1
+- 标准错误（standard error）：文件描述符为 2
+
+```c
+#include <unistd.h>
+
+// 以下常量可以代替显式的描述符值
+STDIN_FILENO    // standard input
+STDOUT_FILENO    // standard output
+STDERR_FILENO    // standard error
+```
+
+**改变当前的文件位置**：对于每个已打开文件，内核维护一个文件位置 $k$，初始值为 0，表示**从文件开头起的字节偏移量**。应用程序可以通过 `seek` 操作显式地设置文件的当前位置
+
+**读写文件**：
+
+- 读就是从当前文件位置 $k$ 起复制 $n>0$ 个字节到主存，然后将 $k$ 增加到 $k+n$。若文件大小为 $m$ 字节，则当 $k\geq m$ 时读操作会触发 EOF 条件。文件末尾并没有明确的 EOF 字符。
+- 类似地，写就是从主存复制 $n>0$ 个字节到当前文件位置 $k$，然后更新 $k$
+
+**关闭文件**：应用程序通过要求内核关闭文件来指明它已经完成了对某个文件的访问。内核释放文件打开时创建的数据结构，将描述符恢复到可用的描述符池。无论进程因何终止，内核都会关闭所有打开的文件，并释放它们的内存
+
+## 文件
+
+Linux 文件有一个**类型**（type），包括：
+
+- **普通文件**（regular file）：包含任意数据，在 `ls` 里用 `-` 指示。应用程序经常需要区分文本文件（只含有 ASCII 或 Unicode 字符的普通文件）和二进制文件（所有非文本文件）。对内核来说，文本文件和二进制文件没有区别
+- **目录**（directory）：包含一组**链接**（link）的文件名，每个链接都将一个文件名映射到一个文件（可以也是目录），在 `ls` 里用 `d` 指示。每个目录至少含有两个条目：`.` 是到目录自身的链接，`..` 是到父目录的链接
+- **套接字**（socket）：用于进程间的跨网络通信
+- 其他文件类型：命名通道（named pipe）、符号链接（symbolic link）、字符和块设备（character and block device）
+
+Linux 内核将所有文件组织成一个**目录层次结构**（directory hierarchy）
+
+每个进程都有一个**当前工作目录**（current working directory），这是它**上下文的一部分**。
+
+**路径名**是一个字符串，包含一系列 `/` 分隔的文件名，分为**绝对路径名**（`/home/xm/helloc.c`）和**相对路径名**（`./hello.c`）
+
+## 打开和关闭文件
+
+```c
+#include <sys/types.h>
+#include <sys/stat.h>
+#include <fcntl.h>
+
+// 打开路径名 filename 的文件，返回其文件描述符
+// 如果出错，则返回 -1
+int open(char* filename, int flags, mode_t mode);
+```
+
+由 `open` 返回的文件描述符总是**当前进程中最小的未用描述符**，也就是说，如果已经打开了两个文件，其描述符是 `3` 和 `4`，那么下一次调用 `open` 就会返回 `5`。
+
+`flags` 指示进程如何访问文件：
+
+- $\text{O\_RDONLY}$：只读
+- $\text{O\_WRONLY}$：只写
+- $\text{O\_RDWR}$：可读可写
+
+可以用或运算将以上标志与下列标志组合：
+
+- $\text{O\_CREAT}$：如果文件不存在，则创建它的一个**截断的**文件（即创建一个大小为 `0` 的空文件）
+- $\text{O\_TRUNC}$：如果文件存在，就**截断**它。**这会导致文件内容丢失**！
+- $\text{O\_APPEND}$：每次写时都追加到文件的尾端（设置当前文件位置为文件结尾）
+
+**截断**（truncate）：是置空（empty）的同义词，清除文件内容，但不删除文件。文件大小会被置为零。
+
+`mode` 参数**只有在创建文件时**才有意义，指定了新文件的**访问权限**（access permission）：
+
+- $\text{S\_IRUSR}$：User/owner 可读
+- $\text{S\_IWUSR}$：User/owner 可写
+- $\text{S\_IXUSR}$：User/owner 可执行
+- $\text{S\_IRGRP}$：Owner's group 可读
+- $\text{S\_IWGRP}$：Owner's group 可写
+- $\text{S\_IXGRP}$：Owner's group 可执行
+- $\text{S\_IROTH}$：Others 可读
+- $\text{S\_IWOTH}$：Others 可写
+- $\text{S\_IXOTH}$：Others 可执行
+
+每个进程都有一个 `umask`，它是通过调用 `umask` 函数来设置的，是**进程上下文的一部分**。
+
+```c
+#define DEF_MODE S_IRUSR | S_IWUSR | S_IRGRP | S_IWGRP | S_IROTH | S_IWOTH
+#define DEF_UMASK S_IWGRP | S_IWOTH
+
+umask(DEF_UMASK);    // set process's umask
+fd = open(filename, O_CREAT | O_TRUNC | O_WRONLY, DEF_MODE);    // permissions set to mode & ~umask
+// fd's permissions:
+```
+
+新文件的权限位是 `mode & ~umask`，即 `umask` 中置位的权限位会被屏蔽，总是被置零。
+
+`close` 函数关闭文件。**关闭已经关闭的文件会出错**。
+
+```c
+#include <unistd.h>
+
+int close(int fd);    // 关闭文件
+```
+
+## 读和写文件
+
+```c
+#include <unistd.h>
+
+// 从 fd 的当前文件位置复制至多 n 字节到 buf
+// 返回：实际读到的字节数。若 EOF 则返回 0，若出错则返回 -1
+ssize_t read(int fd, void* buf, size_t n);
+
+// 从 buf 复制至多 n 字节到 fd 的当前文件位置
+// 返回：实际写入的字节数。若出错则返回 -1
+ssize_t write(int fd, const void* buf, size_t n);
+```
+
+`lseek` 函数可以让应用程序显式地修改当前文件位置。
+
+> `size_t` 在 x86-64 中被定义为 `unsigned long`，而 `ssize_t` 被定义为 `long`。
+
+有时，`read` 和 `write` 传送的字节比应用程序要求的少，此时的返回值称为**不足值**（short count），原因有：
+
+- **读时遇到 EOF**：文件从当前文件位置其只剩 20 字节，我们却要求读 50 字节，那么此次调用 `read` 就会返回 20，下次调用 `read` 就会返回 0（EOF）。
+- **从终端读文本行**：如果打开文件和终端相关联（键盘和显示器），那么每个 `read` 函数将**一次传送一个文本行**，返回的不足值是文本行的大小
+- **读写网络套接字**（socket）：如果打开的文件对应于网络套接字，那么内部缓冲约束和较长的网络延迟会引起 `read` 和 `write` 返回不足值。
+
+除 EOF 以外，读写磁盘文件时不会遇到不足值。
+
+## 用 RIO 包健壮地读写
+
+RIO (Robust I/O) 包可以自动处理不足值，在像网络程序这样容易出现不足值的应用中非常有用。
+
+RIO 提供了：
+
+- **无缓冲的输入输出函数**：直接在内存和文件之间传送数据。对于将二进制数据在网络和内存之间传送非常有用
+- **带缓冲的输入函数**：高效地从文件中读取文本行和二进制数据。它们是**线程安全**的，在同一个描述符上可以被交错调用：可以在同一个描述符中读一些文本行，然后读一些二进制数据，然后再读一些文本行。
+
+### RIO 的无缓冲的输入输出函数
+
+```c
+#include "csapp.h"
+
+// 从 fd 的当前文件位置复制至多 n 个字节到 buf
+ssize_t rio_readn(int fd, void* usrbuf, size_t n) {
+    size_t nleft = n;
+    ssize_t nread;
+    char* bufp = usrbuf;
+
+    while (nleft > 0) {
+        if ((nread = read(fd, bufp, nleft)) < 0) {
+            if (errno == EINTR)  // interrupted by sig handler return
+                nread = 0;       // and call read() again
+            else
+                return -1;       // errno set by read()
+        } else if (nread == 0)   // EOF
+            break;
+        nleft -= nread;
+        bufp += nread;
+    }
+    return (n - nleft);  // return >= 0
+}
+
+// 从 buf 复制 n 个字节到 fd 的当前文件位置
+ssize_t rio_writen(int fd, void* usrbuf, size_t n) {
+    size_t nleft = n;
+    ssize_t nwritten;
+    char* bufp = usrbuf;
+
+    while (nleft > 0) {
+        if ((nwritten = write(fd, bufp, nleft)) <= 0) {
+            if (errno == EINTR)  // interrupted by sig handler return
+                nwritten = 0;    // and call write() again
+            else
+                return -1;       // errno set by write()
+        }
+        nleft -= nwritten;
+        bufp += nwritten;
+    }
+    return n;
+}
+```
+
+`rio_readn` 只会在 EOF 情形下返回不足值，`rio_writen` 从不返回不足值。对同一个描述符，可以任意地交错调用 `rio_readn` 和 `rio_writen`。
+
+如果 `rio_readn` 和 `rio_writen` 被一个**从应用信号处理程序地返回**中断，那么它们会显式地重启 `read` 和 `write` 函数。为了可移植性，我们允许被中断的系统调用，在必要时重启它们。
+
+### RIO 的带缓冲的输入函数
+
+```c
+#include "csapp.h"
+
+#define RIO_BUFSIZE 8192
+typedef struct {
+    int rio_fd;                // descriptor for this internal buf
+    int rio_cnt;               // unread bytes in internal buf
+    char* rio_bufptr;          // next unread byte in internal buf
+    char rio_buf[RIO_BUFSIZE]; // internal buffer
+} rio_t;
+
+// 将描述符 fd 注册为一个 `rio_t` 对象。
+void rio_readinitb(rio_t* rp, int fd) {
+    rp->rio_fd = fd;
+    rp->rio_cnt = 0;
+    rp->rio_bufptr = rp->rio_buf;
+}
+
+// Linux read 函数的带缓冲的版本，是 RIO 包内部函数
+static ssize_t rio_read(rio_t* rp, char* usrbuf, size_t n) {
+    int cnt;
+
+    while (rp->rio_cnt <= 0) {  // refill if buf is empty
+        rp->rio_cnt = read(rp->rio_fd, rp->rio_buf, sizeof(rp->rio_buf));
+
+        if (rp->rio_cnt < 0) {
+            if (errno != EINTR)  // interrupted by sig handler return
+                return -1;
+        }
+        else if (rp->rio_cnt == 0)  // EOF
+            return 0;
+        else
+            rp->rio_bufptr = rp->rio_buf;  // reset buffer ptr
+    }
+
+    // copy min(n, rp->rio_cnt) bytes from internal buf to user buf
+    cnt = n;
+    if (rp->rio_cnt < n)
+        cnt = rp->rio_cnt;
+    memcpy(usrbuf, rp->rio_bufptr, cnt);
+    rp->rio_bufptr += cnt;
+    rp->rio_cnt -= cnt;
+    return cnt;
+}
+
+// 从 rp 读出下一个文本行（包括换行），将它复制到 usrbuf，并追加 NULL 字符，返回读到的行数
+// 最多读 maxlen - 1 个字节，余下的一个字节留给 NULL，文本行中多出的字节被丢弃
+ssize_t rio_readlineb(rio_t* rp, void* usrbuf, size_t maxlen) {
+    int n, rc;
+    char c;
+    char* bufp = usrbuf;
+
+    for (n = 1; n < maxlen; n++) {
+        if ((rc = rio_read(rp, &c, 1)) == 1) {    // read 1 byte
+            *bufp++ = c;
+            if (c == '\n') {
+                n++;
+                break;
+            }
+        } else if (rc == 0) {
+            if (n == 1)
+                return 0;  // EOF, no data read
+            else
+                break;     // EOF, some data was read
+        } else
+            return -1;     // error
+    }
+    *bufp = 0;
+    return n - 1;
+}
+
+// 从 rp 读至多 n 字节到 usrbuf
+ssize_t rio_readnb(rio_t* rp, void* usrbuf, size_t n) {
+    size_t nleft = n;
+    ssize_t nread;
+    char* bufp = usrbuf;
+
+    while (nleft > 0) {
+        if ((nread = rio_read(rp, bufp, nleft)) < 0) {
+            if (errno == EINTR)  // interrupted by sig handler return
+                nread = 0;       // and call read() again
+            else
+                return -1;       // errno set by read()
+        } else if (nread == 0)   // EOF
+            break;
+        nleft -= nread;
+        bufp += nread;
+    }
+    return (n - nleft);  // return >= 0
+}  // 其实现和 rio_readn 几乎一样
+```
+
+对同一描述符，**对以上两个带缓冲的输入函数的调用可以任意交错进行**，但是对带缓冲的输入函数的调用**不应和无缓冲的 `rio_readn` 函数交错调用**
+
+## 读取文件元数据
+
+应用程序可以调用 `stat` 和 `fstat` 函数，获得文件的**元数据**（metadata）
+
+```c
+#include <unistd.h>
+#include <sys/stat.h>
+
+// metadata returned by stat and fstat
+struct stat {
+    dev_t st_dev;         // device number
+    ino_t st_ino;         // inode number
+    mode_t st_mode;       // protection and file types
+    nlink_t st_nlink;     // number of hard links
+    uid_t st_uid;         // user ID of owner
+    gid_t st_gid;         // group ID of owner
+    dev_t st_rdev;        // device type (if inode device)
+    off_t st_size;        // total size, in bytes
+    unsigned long st_blksize; // blocksize for filesystem I/O
+    unsigned long st_blocks;   // number of blocks allocated
+    time_t st_atime;      // time of last access
+    time_t st_mtime;      // time of last modification
+    time_t st_ctime;      // time of last status change
+};
+
+// 这两个函数以路径名或文件描述符作为输入，将文件元数据填充在 buf 参数中
+// 返回：若成功则返回 0，若出错则返回 -1
+int stat(const char* filename, struct stat* buf);
+int fstat(int fd, struct stat* buf);
+```
+
+`st_size`：文件的字节数大小
+`st_mode`：文件访问权限和文件类型
+
+```c
+#include <sys/stat.h>
+
+// 确定 st_mode 指示的文件类型的宏谓词
+S_ISREG(m)    // is this a regular file?
+S_ISDIR(m)    // is this a directory file?
+S_ISSOCK(m)    // is this a network socket?
+```
+
+```c
+#include "csapp.h"
+
+int main(int argc, char** argv) {
+    struct stat stat;
+    char* type, *readok;
+
+    Stat(argv[1], &stat);
+    if (S_ISREG(stat.st_mode))    // determine file type
+        type = "regular";
+    else if (S_ISDIR(stat.st_mode))
+        type = "directory";
+    else
+        type = "other";
+    if ((stat.st_mode & S_IRUSR)) // check read access
+        readok = "yes";
+    else
+        readok = "no";
+    printf("type: %s, read: %s\n", type, readok);
+    exit(0);
+}
+```
+
+## 读取目录内容
+
+**目录流**（directory stream）是对一个有序列表的抽象，此处就是一个目录中的文件列表。
+
+```c
+#include <sys/types.h>
+#include <dirent.h>
+
+// 打开目录，返回一个指向目录流的指针，出错返回 NULL
+DIR* opendir(const char* name);
+
+struct dirent {
+    ino_t d_ino;       // inode number
+    char d_name[256];  // null-terminated filename
+};
+
+// 返回指向流 dirp 中下一个目录项的指针
+// 如果没有更多的目录项 返回 NULL
+// 如果出错 返回 NULL 并设置 errno
+struct dirent* readdir(DIR* dirp);
+
+// 关闭目录流并释放资源，成功返回 0，出错返回 -1
+int closedir(DIR* dirp);
+```
+
+区分 `readdir` 调用出错和流结束情况的唯一方法是检查 `errno` 是否被修改。
+
+```c
+#include "csapp.h"
+
+int main(int argc, char** argv) {
+    DIR* streamp;
+    struct dirent* dep;
+
+    streamp = Opendir(argv[1]);
+
+    errno = 0;
+    while ((dep = readdir(streamp)) != NULL) {
+        printf("Found file: %s\n", dep->d_name);
+    }
+    if (errno != 0)
+        unix_error("readdir error");
+
+    closedir(streamp);
+    exit(0);
+}
+```
+
+## 共享文件
+
+内核用三个数据结构标识打开的文件：
+
+- **描述符表**（descriptor table）：每个进程有一张独立的描述符表，表项的**索引是打开的文件描述符**，表项是**指向文件表**的指针
+- **文件表**（file table）：包含已打开的文件，所有进程共享文件表。表项包括**当前文件位置**、**引用计数**和一个**指向 v-node 表项的指针**。引用计数是指向此文件表表项的描述符表表项的个数。内核只会在其引用计数归零时删除文件表表项
+- **v-node 表**（v-node table）：所有进程共享 v-node 表。v-node 表项包括 `stat` 结构中的大多数信息，包括 `st_mode` 和 `st_size` 等。
+
+如果用同一个 `filename` 调用 `open` 两次，那么两个描述符表表项所指向的两个文件表表项会指向同一个 v-node 表表项。
+
+![](images/10-12-file-sharing.png)
+
+如果父进程调用 `fork` 创建子进程，那么子进程会继承父进程的描述符表，如下图。必须等到父子进程均关闭文件后，内核才能删除相应的文件表表项。
+
+![](images/10-14-父子进程共享文件.png)
+
+## I/O 重定向
+
+```c
+#include <unistd.h>
+
+// 用描述表表项 oldfd 覆写描述符表表项 newfd
+// 如果 newfd 已经打开，dup2 会在覆写前将其关闭
+int dup2(int oldfd, int newfd);
+```
+
+如果调用 `dup2(4, 1)` 之前的状态如图 10-12，那么调用之后的状态如图 10-15，此时文件 A 已经被关闭，它的文件表表项和 v-node 表表项也被删除，文件 B 的引用计数增加到 2。从此，任何写到标准输出的数据都会被重定向到文件 B。
+
+![](images/10-15-重定向输出.png)
+
+## 标准 I/O
+
+**标准 I/O 库**是 C 定义的一组高级输入输出函数。
+
+它将一个已打开的文件视为一个**流**，即一个指向 `FILE` 对象的指针。每个 ANSI C 程序开始时都有三个已打开的流：
+
+```c
+#include <stdio.h>
+
+extern FILE* stdin;    // standard input
+extern FILE* stdout;   // standard output
+extern FILE* stderr;   // standard error
+```
+
+流是**对文件描述符和流缓冲区的抽象**。流缓冲区和 RIO 读缓冲区类似，都是为了减少高开销的 Linux I/O 系统调用的次数，使局部性好的访问尽可能多从缓冲区得到服务。
+
+## 我该使用哪些 I/O 函数？
+
+- 尽量使用标准 I/O。对磁盘和终端设备 I/O 来说，这是最优解（不过标准 I/O 库没有与 `stat` 对应的函数）。
+- 不要用 `scanf` 或 `rio_readlineb` 读二进制文件。二进制文件中可能包含许多 `0xa` 字节，这会被误认为是换行符。
+- 对于网络套接字，使用 RIO 包。
+
+标准 I/O 流是**全双工**（full duplex）的，即程序可以在同一个流上执行输入和输出。但对流的限制和对套接字的限制有时会冲突。
+
+- **输出函数之后的输入函数**：如果中间没有插入 `fflush`、`fseek`、`fsetpos` 或 `rewind`，那么输入函数不能跟随在一个输出函数之后。`fflush` 清空与流相关的缓冲区，而后三者使用 Unix I/O `lseek` 函数来重置当前文件位置。
+- **输入函数之后的输出函数**：如果中间没有插入 `fseek`、`fsetpos` 或 `rewind`，那么输出函数不能跟随在一个输入函数之后。**除非输入函数遭遇了 EOF**。
+
+这两个限制给网络应用带来了麻烦。
+
+第一个限制可以通过每次输入前调用 `fflush` 解决，然而由于对套接字调用 `lseek` 函数是非法的，解决第二个限制的唯一办法是**对同一个打开的套接字描述符打开两个流**，一个读，一个写。
+
+```c
+FILE* fpin;
+FILE* fpout;
+
+fpin = fdopen(sockfd, "r");
+fpout = fdopen(sockfd, "w");
+
+// 这又要求应用程序必须对两个流都调用 fclose，从而释放两个流的内存资源
+fclose(fpin);
+fclose(fpout);
+// 由于 sockfd 已经被关系，所以第二次 fclose 会失败
+// 对顺序的程序，这不是问题。
+// 但是在线程化的程序中关闭一个已关闭的描述符会导致灾难
+// 因此：不要在网络套接字上使用标准 I/O 函数，换用 RIO 函数完成 I/O 操作
+// 如果需要格式化输出，使用 sprintf 格式化一个字符串，再用 rio_writen 将它发送到套接口。
+// 如果需要格式化输入，使用 rio_readlineb 读取一个完整的文本行，再用 sscanf 解析它
+```
