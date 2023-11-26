@@ -77,6 +77,23 @@
   - [非本地跳转](#非本地跳转)
   - [操作进程的工具](#操作进程的工具)
 - [虚拟内存](#虚拟内存)
+  - [物理和虚拟寻址](#物理和虚拟寻址)
+  - [地址空间](#地址空间)
+  - [虚拟内存作为缓存的工具](#虚拟内存作为缓存的工具)
+    - [DRAM 缓存的组织结构](#dram-缓存的组织结构)
+    - [页表](#页表)
+    - [页命中](#页命中)
+    - [缺页](#缺页)
+    - [分配页面](#分配页面)
+    - [又是局部性救了我们](#又是局部性救了我们)
+  - [虚拟内存作为内存管理的工具](#虚拟内存作为内存管理的工具)
+  - [虚拟内存作为内存保护的工具](#虚拟内存作为内存保护的工具)
+  - [地址翻译](#地址翻译)
+    - [结合高速缓存和虚拟内存](#结合高速缓存和虚拟内存)
+    - [利用 TLB 加速地址翻译](#利用-tlb-加速地址翻译)
+    - [多级页表](#多级页表)
+    - [综合：端到端的地址翻译](#综合端到端的地址翻译)
+  - [案例研究：Intel Core i7/Linux 内存系统](#案例研究intel-core-i7linux-内存系统)
 - [系统级 I/O](#系统级-io)
   - [Unix I/O](#unix-io)
   - [文件](#文件)
@@ -237,13 +254,13 @@ typedef struct {
 
 在**可重定位目标文件**有三个**伪节**（pseudosection），它们在节头部表中没有条目：
 
-- ABS 代表**不该被重定位的符号**
+- ABS 代表**不该被重定位的符号**（文件名）
 - UNDEF 代表**本模块中被引用，但未定义的符号**
 - COMMON 代表还未被分配位置的未初始化的数据目标，即**被试探性定义的全局符号**。对于此目标，`value` 字段给出对齐要求，而 `size` 给出最小大小
 
-**可执行目标文件中没有以上伪节**。
+**可执行目标文件中也可能有以上伪节**。
 
-如果指定了 `-fcommon` 编译选项，gcc 会将被试探性定义的全局符号分配到 COMMON 节，以让链接器选择定义。**未初始化的静态变量**和**零初始化的全局或静态变量**照常被分配到 `.bss` 节。
+如果指定了 `-fcommon` 编译选项，gcc 会将被试探性定义的全局符号分配到 COMMON 节，以让链接器选择定义。**未初始化的静态变量**和**零初始化的全局或静态变量**照常被分配到 `.bss` 节。在可执行目标文件中，COMMON 中的数据进入 `.bss` 节。
 
 可以用 GNU `readelf` 程序查看目标文件内容。
 
@@ -1067,7 +1084,7 @@ GNU binutils 包：
 
 程序计数器假设一个指令地址序列 $a_0,a_1,\cdots,a_{n-1}$。每次从 $a_k$ 到 $a_{k+1}$ 的过渡称为**控制转移**（control transfer），这样的控制转移序列是处理器的**控制流**（control flow）。如果每个指令在内存中都是相邻的，那么控制流就是平滑的，否则称控制流发生了“突变”，这通常由跳转、调用、返回等指令引起。
 
-系统需要对系统状态的变化做出反应，在现代系统中体现为控制流的突变，这种突变称为**异常控制流**（Exceptional Control Flow, ECF）。
+系统需要对系统状态的变化做出反应，在现代系统中体现为控制流的突变，这种突变称为**异常控制流**（Exceptional Control Flow, **ECF**）。
 
 ## 异常
 
@@ -1077,7 +1094,9 @@ GNU binutils 包：
 
 ![](images/8-1-异常.png)
 
-称处理器**状态**的变化为**事件**（event）。事件可能和当前指令 $I_{\text{curr}}$ 的执行有关，如虚拟内存缺页、整数除零、算术溢出，也可能无关，如系统定时器产生信号或一个 I/O 请求完成。
+称处理器**状态**的变化为**事件**（event）。
+
+事件可能和当前指令 $I_{\text{curr}}$ 的执行有关，如虚拟内存缺页、整数除零、算术溢出，也可能无关，如系统定时器产生信号或一个 I/O 请求完成。
 
 处理器检测到事件发生后，通过称为**异常表**（Exception table）的跳转表进行一个间接过程调用，到一个称为**异常处理程序**（exception handler）的操作系统子程序。此后，异常处理程序可能：
 
@@ -1089,7 +1108,9 @@ GNU binutils 包：
 
 每种可能的异常类型都有一个唯一的**非负整数**的**异常号**（exception number）。一些由处理器设计者分配，例如除以零、缺页、内存访问违例、断点以及算术溢出；另一些由内核设计者分配，如系统调用和来自外部 I/O 设备的信号。
 
-系统启动时（重启或加电），操作系统分配并初始化异常表，**将每个表目（以异常号索引）映射到其对应异常处理程序的地址**。
+系统启动时（重启或加电），操作系统分配并初始化**异常表**。
+
+异常表表项的索引是**异常号**，表项是**指向异常处理程序的指针**。
 
 异常表起始地址在一个称为**异常表基址寄存器**（exception table base register）的特殊 CPU 寄存器中。触发异常时，按 `(异常表基址寄存器, 异常号, 8)` 的方式寻址异常处理程序。
 
@@ -1100,7 +1121,7 @@ GNU binutils 包：
 - 若控制从用户程序转移到内核，那么所有状态会被压到**内核栈**，而非用户栈
 - 异常处理程序运行在**内核模式**，它们对所有系统资源都有完全的访问权限
 
-异常处理结束时，它可以执行一条“从中断返回”指令，返回被中断的程序（也可以不）。该指令**将状态弹回**到处理器的控制和数据寄存器，**将模式恢复**到**用户模式**（如果是用户程序产生了异常），然后将控制返回。
+异常处理程序结束时，它可以执行一条“从中断返回”指令，返回被中断的程序（也可以不）。该指令**将状态弹回**到处理器的控制和数据寄存器，**将模式恢复**到**用户模式**（如果是用户程序产生了异常），然后将控制返回。
 
 ### 异常的类别
 
@@ -1113,25 +1134,25 @@ GNU binutils 包：
 
 #### 中断
 
-异步：指事件的发生不依赖于当前指令的执行。
+**异步**：指**事件的发生不依赖于当前指令的执行**。
 
 I/O 设备，如磁盘驱动器、网络适配器、磁盘控制器或定时器芯片，可以向处理器芯片上的一个引脚发信号，并将异常号放在系统总线上来触发中断。异常号标识了引起中断的设备。
 
 在当前指令完成后，处理器注意到中断引脚电压升高，因此从系统总线读取异常号，调用对应的**中断处理程序**（interrupt handler），处理程序返回到当前指令的下一条指令。
 
-![](images/8-5-interrupt-trap.png)
-
 #### 陷阱
 
-同步：异常是执行当前指令的结果，这类指令称为**故障指令**（faulting instruction）。
+**同步**：异常是执行当前指令的结果，这类指令称为**故障指令**（faulting instruction）。
 
 陷阱是有意的异常，其最重要的用途是在用户程序和内核之间提供一个像过程一样的接口，称为**系统调用**（system call）。
 
-系统调用是用户进程向内核进程请求服务（例如读某个文件 `read`、创建新进程 `fork`、加载新的程序 `execve`、终止当前进程 `exit`）的主要方法。
+系统调用是用户进程向内核进程请求服务的主要方法。
 
-处理器提供了 `syscall n` 指令，为用户程序提供了对内核服务的受控的访问，它导致一个到异常处理程序的陷阱，陷阱处理程序会解析参数，并调用适当的内核程序。
+处理器提供了 `syscall n` 指令，它导致一个到异常处理程序的陷阱，这个异常处理程序解析参数，并调用适当的内核程序。
 
 借助异常实现系统调用，是为了从用户模式切换到内核模式。
+
+![](images/8-5-interrupt-trap.png)
 
 #### 故障
 
@@ -1141,11 +1162,13 @@ I/O 设备，如磁盘驱动器、网络适配器、磁盘控制器或定时器�
 
 否则它返回到内核的 `abort` 例程，终止引起故障的应用程序。
 
-![](images/8-7-fault-abort.png)
-
 #### 终止
 
 终止是不可恢复的致命错误，例如 DRAM 或 SRAM 位被损坏时发生的奇偶错误。
+
+终止处理程序从不将控制返回给应用程序，它直接返回到 `abort` 例程，终止应用程序。
+
+![](images/8-7-fault-abort.png)
 
 ### Linux/x86-64 系统中的异常
 
@@ -1171,13 +1194,13 @@ I/O 设备，如磁盘驱动器、网络适配器、磁盘控制器或定时器�
 
 #### Linux/x86-64 系统调用
 
-每个系统调用有唯一的整数号，对应一个到内核中跳转表的偏移量（和异常表不同）
+每个系统调用有唯一的整数号，对应一个**到内核中跳转表的偏移量**（和异常表不同）
 
 C 程序可以用 `syscall` 函数直接调用任何系统调用，但这不必要，因为标准库提供了各种系统调用的包装函数。系统调用及其包装函数称为**系统级函数**。
 
 所有到 Linux 系统调用的参数都是通过**通用寄存器**，而非栈，传递的。
 
-按惯例，系统调用号放在 `%rax` 中，参数依次放在 `%rdi`、`%rsi`、`%rdx`、`%r10`、`%r8` 和 `%r9` 中。系统调用的返回值放在 `%rax` 中。从系统调用返回时，寄存器 `%rcx`、`%r11` 会被破坏。
+按惯例，**系统调用号放在 `%rax` 中**，参数依次放在 `%rdi`、`%rsi`、`%rdx`、`%r10`、`%r8` 和 `%r9` 中。系统调用的返回值放在 `%rax` 中。从系统调用返回时，**寄存器 `%rcx`、`%r11` 会被破坏**。
 
 -4095 到 -1 之间的返回值表明发生了错误，对应于负的 `errno`。
 
@@ -1238,15 +1261,15 @@ main:
 
 **进程**（process）：一个正在执行的程序的实例。
 
-每个程序都运行在某个进程的**上下文**（context）中，上下文是内核重新启动一个被抢占的进程所需的状态，包括
+每个程序都运行在某个进程的**上下文**（context）中，上下文由一个程序正确运行所需的状态组成，包括
 
-- 内存中的程序代码和数据
-- 用户栈
-- 通用目的寄存器、浮点寄存器、程序计数器、状态寄存器
-- 内核栈
-- 各种内核数据结构（如描述地址空间的页表、包含有关当前进程信息的进程表、包含进程已打开文件的信息的文件表）
+- **内存中的程序代码和数据**
+- **用户栈**
+- **内核栈**
+- **寄存器**（通用目的寄存器、浮点寄存器、程序计数器、状态寄存器）
+- 各种**内核数据结构**（如描述地址空间的**页表**、包含有关当前进程信息的**进程表**、包含进程已打开文件的信息的**文件表**）
 
-每次在 `shell` 中运行可执行目标文件都会让 `shell` 创建一个新进程。应用程序也可以创建进程。
+每次在 shell 中运行可执行目标文件，shell 都会创建一个新进程，在新进程中运行文件。应用程序也可以创建进程。
 
 进程提供两个主要的抽象：
 
@@ -1256,6 +1279,8 @@ main:
 ### 逻辑控制流
 
 ![](images/8-12-逻辑控制流.png)
+
+与程序指令相对应的 PC 值的序列就是这个程序的**逻辑控制流**，简称逻辑流。
 
 如上，处理器的物理控制流被分成了三个独立的逻辑控制流，它们交错执行，轮流使用处理器。每个进程执行流的一部分，然后被**抢占**（preempted）（暂时挂起）。
 
@@ -1291,7 +1316,7 @@ Linux 提供了 `/proc` 文件系统，将许多内核数据结构的内容输�
 
 ### 上下文切换
 
-内核可以决定**调度某个（先前被抢占过的）进程**时，使这个进程抢占当前的进程，这由内核中的**调度器**（scheduler）处理。
+内核可以决定**调度某个（先前被抢占过的）进程**，使这个进程抢占当前的进程，这种决策由内核中的**调度器**（scheduler）完成。
 
 内核使用**上下文切换**（context switch）机制实现此过程中控制的交接，这包括：
 
@@ -1301,7 +1326,7 @@ Linux 提供了 `/proc` 文件系统，将许多内核数据结构的内容输�
 
 内核代表用户执行**系统调用**时，可能发生上下文切换。若系统调用因为等待某个事件而阻塞（例如等待磁盘读写），内核可以让当前进程休眠，切换到另一个进程。`sleep` 系统调用可以显式请求让调用进程休眠。不过即使系统调用没有阻塞，内核也可以选择执行上下文切换。
 
-**中断**也可能引起上下文切换。所有系统都有某种产生周期性定时器中断的机制，通常为每 1 ms 或每 10 ms，每次发生定时器中断时，内核判定当前进程已运行了足够长的时间，就会执行上下文切换。
+**中断**也可能引起上下文切换。所有系统都有某种产生周期性定时器中断的机制，通常为每 1 ms 或每 10 ms。每次发生定时器中断时，内核判定当前进程已运行了足够长的时间，就会执行上下文切换。
 
 ![](images/8-14-进程上下文切换.png)
 
@@ -1356,8 +1381,11 @@ pid = Fork();
 #include <sys/types.h>
 #include <unistd.h>
 
-pid_t getpid(void);     // 返回调用进程的 PID
-pid_t getppid(void);    // 返回调用进程父进程的 PID
+// 返回：调用进程的 PID
+pid_t getpid(void);
+
+// 返回：调用进程父进程的 PID
+pid_t getppid(void);
 
 // pid_t 在 Linux 上被定义为 int
 ```
@@ -1378,12 +1406,18 @@ pid_t getppid(void);    // 返回调用进程父进程的 PID
 ```c
 #include <stdlib.h>
 
-void exit(int status);    // 终止进程，退出状态为 status
+// 终止进程，退出状态为 status
+// 返回：不返回
+void exit(int status);
 ```
 
 父进程通过 `fork` **创建**新的运行的子进程。
 
-子进程得到与父进程**用户级虚拟地址空间**相同的副本（但是是**独立**的），包括相同的代码、数据段、本地变量值、堆、共享库和用户栈。子进程也拥有与父进程任何打开的**文件描述符**相同的副本，可以读写父进程任何打开的文件。
+子进程得到父进程**用户级虚拟地址空间的副本**，包括相同的代码、数据段、本地变量值、堆、共享库和用户栈。
+
+子进程也拥有父进程**文件描述符表的副本**，可以读写父进程任何打开的文件。
+
+子进程得到的副本**与父进程独立**。
 
 `fork` **只被调用一次，但会返回两次**：一次在调用进程（父进程）**返回子进程的 PID**，一次在新创建的子进程中**返回 0**。可以从返回值分辨父进程和子进程。
 
@@ -1391,7 +1425,9 @@ void exit(int status);    // 终止进程，退出状态为 status
 #include <sys/types.h>
 #include <unistd.h>
 
+// 返回：子进程返回 0，父进程返回子进程的 PID，出错则返回 -1
 pid_t fork(void);
+
 pid_t Fork(void);    // wrapper function
 
 int main() {
@@ -1426,9 +1462,9 @@ int main() {
 
 ### 回收子进程
 
-进程终止后，内核不会立即将其清除。进程会保持在一种已终止的状态，内核继续保存它的退出状态，直到被其父进程**回收**（reaped）。
+进程终止后，内核不会立即将其清除。进程会保持在一种已终止的状态，**内核继续保存它的退出状态**，直到被其父进程**回收**（reaped）。
 
-父进程回收已终止的子进程时，内核将子进程的退出状态传递给父进程，然后清除已终止的子进程。
+父进程回收已终止的子进程时，内核将子进程的退出状态传递给父进程，然后清除已终止的子进程，释放相关的内存空间。
 
 终止但未被回收的进程称为**僵死进程**（zombie）。
 
@@ -1436,14 +1472,19 @@ int main() {
 
 长时间运行的程序总是应该回收其僵死子进程，以节约系统的内存资源。
 
+进程可以调用 `waitpid` 函数等待其子进程终止或停止。
+
 ```c
 #include <sys/types.h>
 #include <sys/wait.h>
 
+// 返回：若成功，返回子进程的 PID；若 WNOHANG，返回 0；若出错，返回 -1
 pid_t waitpid(pid_t pid, int* statusp, int options);
 ```
 
-当 `options = 0` 时，`waitpid` 挂起调用进程，直到其**等待集合**（wait set）中的一个子进程终止。若等待集合中的一个进程在刚调用的时刻就已经终止了，`waitpid` 就会立即返回。这两种情况下，返回值是**终止的子进程的 PID**。此时已终止的子进程已经被回收，被内核清除。
+当 `options = 0` 时，`waitpid` **挂起调用进程**，直到其**等待集合**（wait set）中的一个子进程终止，**返回终止的子进程的 PID**（如果调用时已经有子进程终止了，则立即返回）。
+
+此时已终止的子进程已经被回收。
 
 #### 判定等待集合的成员
 
@@ -1461,7 +1502,9 @@ pid_t waitpid(pid_t pid, int* statusp, int options);
 - $\text{WUNTRACED}$：挂起调用进程，直到等待集合的某个进程**终止或被停止**（而不只是终止），返回这个终止或停止的子进程的 PID
 - $\text{WCONTINUED}$：挂起调用进程，直到等待集合中一个正在运行的进程终止，**或一个被停止的进程收到 $\text{SIGCONT}$ 信号重新开始执行**
 
-可以用 `|` 把这些以上选项组合起来。
+可以用 `|` 把这些以上选项组合起来：
+
+$\text{WNOHANG} \mid \text{WUNTRACED}$：**立即返回**，如果等待集合中的子进程均未停止或终止，则返回零；否则返回终止或停止的子进程的 PID
 
 #### 检查已回收子进程的退出状态
 
@@ -1470,7 +1513,7 @@ pid_t waitpid(pid_t pid, int* statusp, int options);
 `status` 是 `statusp` 指向的值，其值在 `wait.h` 被解释为：
 
 - $\text{WIFEXITED(status)}$：若子进程通过调用 `exit` 或一个 `return` **正常终止**，则返回真
-- $\text{WEXITSTATUS(status)}$：返回一个**正常终止**的子进程的**退出状态**，只有在 $\text{WIFEXITED()}$ 返回真时才会被定义
+  - $\text{WEXITSTATUS(status)}$：返回一个**正常终止**的子进程的**退出状态**，只有在 $\text{WIFEXITED()}$ 返回真时才会被定义
 - $\text{WIFSIGNALED(status)}$：若子进程**由于一个未被捕获的信号终止**，则返回真
   - $\text{WTERMISIG(status)}$：返回**导致子进程终止的信号编号**，只有在 $\text{WIFSIGNALED()}$ 返回真时才会被定义
 - $\text{WIFSTOPPED(status)}$：若引起返回的子进程当前是**停止**的，则返回真
@@ -1493,6 +1536,8 @@ pid_t waitpid(pid_t pid, int* statusp, int options);
 #include <sys/types.h>
 #include <sys/wait.h>
 
+
+// 返回：若成功，返回终止子进程的 PID；若出错，返回 -1
 pid_t wait(int* statusp);
 
 wait(&status);    // 等价于 waitpid(-1, &status, 0);
@@ -1536,7 +1581,10 @@ int main() {
 ```c
 #include <unistd.h>
 
+// 返回：还要休眠的秒数
 unsigned int sleep(unsigned int secs);
+
+// 返回：永远返回 -1
 int pause(void);
 ```
 
@@ -1548,15 +1596,14 @@ int pause(void);
 
 ### 加载并运行程序
 
+`execve` 以参数列表 `argv` 和环境变量列表 `envp` 加载并运行可执行目标文件 `filename`
+
 ```c
 #include <unistd.h>
 
+// 返回：若成功，不返回；若出错，返回 -1
 int execve(const char* filename, const char* argv[], const char* envp[]);
-// exec-v-e
-// exec for execute, v for vector, e for environment variable
 ```
-
-`execve` 以参数列表 `argv` 和环境变量列表 `envp` 加载并运行可执行目标文件 `filename`。
 
 **只有当出现错误时**（如 `filename` 不存在），`execve` 才会返回到调用程序。即，`execve` **调用一次，从不返回**。
 
@@ -1568,9 +1615,9 @@ int execve(const char* filename, const char* argv[], const char* envp[]);
 
 `execve` 启动加载器，
 
-- 加载器删除子进程现有的虚拟内存段，创建一组新的代码、数据、堆和栈段
-- 新的栈和堆被初始化为零
-- 通过将虚拟地址空间中的页映射到可执行文件的页大小的片（chunk），新的代码和数据段被初始化为可执行文件的内容
+- 加载器删除子进程现有的虚拟内存段，创建一组新的代码段、数据段、堆段和栈段
+- 新的栈段和堆段被初始化为零
+- 新的代码和数据段被初始化为可执行文件的内容，这通过将虚拟地址空间中的页映射到可执行文件的页大小的片（chunk）完成
 - 最后，加载器跳转到 `_start`，`_start` 调用 `_libc_start_main`，最终调用 `main(int argc, char* argv[], char* envp[])`
 
 当 `main` 开始执行时，用户栈的结构如下：
@@ -1580,19 +1627,25 @@ int execve(const char* filename, const char* argv[], const char* envp[]);
 ```c
 #include <stdlib.h>
 
-// getenv 在环境变量数组 envp 里搜索字符串 "name=value"
-// 若找到，则返回指向 value 的指针（未找到则返回空指针）
+// 返回：若找到，返回指向 value 的指针；未找到则返回空指针
 char* getenv(const char* name);
 
-// 如果 name 不存在，则将其添加到数组
-// 如果 name 存在，且 overwrite 为真，则将其值改为 newvalue
-// 否则不作操作
-// 返回 0 表示成功，-1 表示失败
+// 返回：若成功，返回 0；若出错，返回 -1
 int setenv(const char* name, const char* newvalue, int overwrite);
 
-// 从环境变量数组中删除 name
+// 返回：无
 void unsetenv(const char* name);
 ```
+
+`getenv` 在环境变量数组 `envp` 里搜索字符串 `"name=value"`。
+
+`setenv` 修改环境变量数组：
+
+- 若 `name` 不存在，将其添加到 `envp` 数组
+- 若 `name` 存在，且 `overwrite` 为真，则将其值覆写为 `newvalue`
+- 否则不作操作
+
+`unsetenv` 从 `envp` 数组中删除 `name`。
 
 > 程序是一堆代码和数据，可以作为目标文件存在于磁盘上，或作为段存在于地址空间中。
 > 进程是**执行中程序的具体实例**。程序总是运行在某个进程的上下文中。
@@ -1703,7 +1756,7 @@ int main() {
 
 信号通知进程**系统中发生了一个事件**，每种信号类型都对应某种系统事件。
 
-底层的硬件异常由内核的异常处理程序处理，正常来说，对用户进程是不可见的。信号可以通知用户进程系统中发生了这些异常，例如，如果一个进程试图除以零，那么内核就会发送给它一个 $\text{SIGFPE}$ 信号。
+**底层的硬件异常由内核的异常处理程序处理**，一般对用户进程不可见。信号可以**通知用户进程**系统中发生了这些异常，例如，如果一个进程试图除以零，那么内核就会发送给它一个 $\text{SIGFPE}$ 信号。
 
 信号也可以通知用户进程系统中的软件事件，例如键入 `Ctrl+C`，内核就会发送一个 $\text{SIGINT}$ 信号给这个前台进程组中的每个进程。一个进程可以向另一个进程发送 $\text{SIGKILL}$ 来强制终止它。当一个子进程终止时，内核会发送 $\text{SIGCHLD}$ 给父进程。
 
@@ -1750,8 +1803,8 @@ $\text{SIGKILL}$ 和 $\text{SIGSTOP}$ 信号**既不能被捕获也不能被忽�
 
 - **发送信号**：内核**更新目的进程上下文中的某个状态**。进程**可以给自己发送信号**。发送信号通常有两种原因：
 
-  - 内核检测到一个系统事件，例如除以零或子进程终止
-  - 一个进程调用 `kill` 函数，显式地向另一个进程发送信号
+  - 内核检测到一个**系统事件**，例如除以零或子进程终止
+  - 一个**进程调用 `kill` 函数**，显式地向另一个进程发送信号
 
 - **接收信号**：目的进程被内核强迫**执行某个动作**作为对信号的反应。进程可以：
   - **忽略**信号
@@ -1764,13 +1817,13 @@ $\text{SIGKILL}$ 和 $\text{SIGSTOP}$ 信号**既不能被捕获也不能被忽�
 
 发出但未被接收的信号是**待处理信号**（pending signal）。
 
-任何时刻，**一种类型至多只会有一个待处理信号**。当进程已有一个类型为 `k` 的待处理信号后，任何接下来发送到此进程的 `k` 类型信号都会被丢弃。
+任何时刻，**一种信号类型至多只会有一个待处理信号**。当进程已有一个类型为 `k` 的待处理信号后，任何接下来发送到此进程的 `k` 类型信号都会被丢弃。
 
-进程可以选择性地**阻塞**接收某种信号。当某种信号被阻塞后，它可以被发送，但不会被接收，即成为一个待处理信号，直到它被进程解除阻塞。
+进程可以**阻塞**接收某类型的信号。当某类型的信号被阻塞后，它可以被发送，但不会被接收，即发送后会成为一个待处理信号，直到它被进程解除阻塞。
 
 一个待处理信号至多只能被接收一次。
 
-内核为每个进程在 `pending` 位向量中维护一个待处理信号的集合，在 `blocked` 位向量中维护被阻塞的信号集合。当 `k` 类型信号被传送，`pending` 的第 `k` 位就会被设置；当 `k` 类型信号被接收，`pending` 的第 `k` 位就会被清除。
+内核为每个进程在 **`pending` 位向量**中维护一个待处理信号的集合，在 **`blocked` 位向量**（又称**信号掩码**，signal mask）中维护被阻塞的信号集合。当 `k` 类型信号被传送，`pending` 的第 `k` 位就会被设置；当 `k` 类型信号被接收，`pending` 的第 `k` 位就会被清除。
 
 ### 发送信号
 
@@ -1783,9 +1836,25 @@ $\text{SIGKILL}$ 和 $\text{SIGSTOP}$ 信号**既不能被捕获也不能被忽�
 ```c
 #include <unistd.h>
 
-pid_t getpgrp(void);    // 返回当前进程的进程组 ID
+// 返回：当前进程的进程组 ID
+pid_t getpgrp(void);
 
-int setpgid(pid_t pid, pid_t pgid);    // 将进程 pid 的进程组 ID 设置为 pgid，如果 pid = 0，就使用当前进程的 PID。如果 pgid 所指示的进程组尚不存在，就创建一个新的进程组
+// 返回：如果成功，返回 0，否则返回 -1
+int setpgid(pid_t pid, pid_t pgid);
+```
+
+`setpgid` 函数设置进程组 ID：
+
+- 如果 `pid > 0`，就将进程 `pid` 的进程组 ID 设置为 `pgid`
+- 如果 `pid = 0`，就将**当前进程**的进程组 ID 设置为 `pgid`
+- 如果 `pgid = 0`，就使用 `pid` 所指定的进程的 PID 作为进程组 ID
+- 如果 `pgid` 所指示的进程组尚不存在，就创建一个新的进程组
+
+例如：
+
+```c
+setpgid(0, 0);
+// 如果当前进程 pid 是 15213，那么这会创建一个新的进程组，其进程组 ID 也是 15213，并将当前进程加入到这个新进程组中
 ```
 
 #### 用 `/bin/kill` 程序发送信号
@@ -1820,24 +1889,30 @@ shell 为每个作业创建一个独立的进程组，进程组 ID 通常取自�
 #include <sys/types.h>
 #include <signal.h>
 
-// 向进程 pid 发送信号 sig
-// 如果 pid = 0，信号就会发送给调用进程所属的进程组中的每个进程
-// 如果 pid < 0，信号就会发送给进程组 -pid 中的每个进程
+// 返回：若成功，返回 0；若出错，返回 -1
 int kill(pid_t pid, int sig);
 ```
+
+`kill` 向进程 `pid` 发送信号 `sig`：
+
+- 如果 `pid > 0`，将信号 `sig` 发送给进程 `pid`
+- 如果 `pid = 0`，信号就会发送给**调用进程所属的进程组中的每个进程**
+- 如果 `pid < 0`，信号就会发送给进程组 `-pid` 中的每个进程
 
 #### 用 `alarm` 函数发送信号
 
 ```c
 #include <unistd.h>
 
-// arranges for the kernel to send a SIGALRM to the calling process in secs seconds
-// if secs = 0, then no new alarm is scheduled
-// Returns:
-// remaining seconds of previous alarm, or 0 if no previous alarm
+// 返回：前一次的待处理的闹钟剩余的秒数（如果此次 alarm 调用没有发生的话），若没有待处理闹钟，返回 0
 unsigned int alarm(unsigned int secs);
-// The call to alarm cancels any pending alarms.
 ```
+
+`alarm` 设置闹钟（alarm），安排内核在 `secs` 秒后向调用进程发送一个 $\text{SIGALRM}$ 信号。
+
+如果 `secs = 0`，则不会安排新的闹钟。
+
+对 `alarm` 的调用会**取消任何待处理的闹钟**。
 
 ### 接收信号
 
@@ -1860,14 +1935,15 @@ unsigned int alarm(unsigned int secs);
 
 typedef void (*sighandler_t)(int);
 
+// 返回：若成功，返回指向前次处理程序的指针；若出错，返回 SIG_ERR，不设置 errno
 sighandler_t signal(int signum, sighandler_t handler);
-// 如果 handler = SIG_IGN，忽略 signum 类型的信号
-// 如果 handler = SIG_DFL，将 signum 类型的信号行为恢复为默认
-// 否则将 signum 类型的信号行为设置为调用 handler 指向的函数，即设置信号处理程序（installing the handler）
-
-// 若成功，返回指向前次处理程序的指针
-// 若出错，返回 SIG_ERR，不设置 errno
 ```
+
+`signal` 函数为 `signum` 类型信号安装（install）信号处理程序 `handler`：
+
+- 如果 `handler = SIG_IGN`，则忽略 `signum` 类型的信号
+- 如果 `handler = SIG_DFL`，则将 `signum` 类型的信号行为恢复为默认
+- 否则将 `signum` 类型的信号行为设置为调用 `handler` 指向的函数（安装信号处理程序 `handler`）
 
 调用信号处理程序称为**捕获信号**，执行信号处理程序称为**处理信号**。
 
@@ -1902,30 +1978,40 @@ int main() {
 ```c
 #include <signal.h>
 
-// 根据 how 改变阻塞信号的集合（blocked 位向量）
+// 返回：若成功，返回 0；若出错，返回 -1
 int sigprocmask(int how, const sigset_t* set, sigset_t* oldset);
 ```
 
+`sigprocmask` 根据 `how` 改变 `blocked` 位向量。
+
 如果 `how` 是：
 
-- $\text{SIG_BLOCK}$：将 `set` 中的信号添加到 `blocked` 中，即 `blocked = blocked | set`
-- $\text{SIG_UNBLOCK}$：将 `set` 中的信号从 `blocked` 中删除，即 `blocked = blocked & ~set`
-- $\text{SIG_SETMASK}$：将 `blocked` 设置为 `set`，即 `blocked = set`
+- $\text{SIG\_BLOCK}$：将 `set` 中的信号添加到 `blocked` 中，即 `blocked = blocked | set`
+- $\text{SIG\_UNBLOCK}$：将 `set` 中的信号从 `blocked` 中删除，即 `blocked = blocked & ~set`
+- $\text{SIG\_SETMASK}$：将 `blocked` 设置为 `set`，即 `blocked = set`
 
 如果 `oldset` 非空，那么 `oldset` 就会保存 `blocked` 的旧值
 
 ```c
 #include <signal.h>
 
+// 以下四个函数的返回：若成功，返回 0；若出错，返回 -1
+
 // 初始化 set 为空
 int sigemptyset(sigset_t* set);
+
 // 初始化 set 为包含所有信号的集合
 int sigfillset(sigset_t* set);
+
 // 将信号 signum 添加到 set 中
 int sigaddset(sigset_t* set, int signum);
+
 // 将信号 signum 从 set 中删除
 int sigdelset(sigset_t* set, int signum);
+
+
 // 测试信号 signum 是否在 set 中
+// 返回：若在，返回 1；若不在，返回 0；若出错，返回 -1
 int sigismember(const sigset_t* set, int signum);
 ```
 
@@ -1963,10 +2049,12 @@ Sigprocmask(SIG_SETMASK, &prev_mask, NULL);
 ```c
 // CSAPP 开发了 SIO 包以供在信号处理程序中使用
 
+// 返回：若成功，返回传送的字节数；若出错，返回 -1
 ssize_t sio_puts(char s[]) {
     return write(STDOUT_FILENO, s, sio_strlen(s));
 }
 
+// 返回：若成功，返回传送的字节数；若出错，返回 -1
 ssize_t sio_putl(long v) {
     char s[128];
 
@@ -1974,6 +2062,7 @@ ssize_t sio_putl(long v) {
     return sio_puts(s);
 }
 
+// 返回：无
 void sio_error(char s[]) {
     sio_puts(s);
     _exit(1);
@@ -2082,6 +2171,7 @@ void handler2(int sig) {
 #include <signal.h>
 
 // 由 POSIX 定义，用于明确指令信号处理语义
+// 返回：若成功，返回 0；若出错，返回 -1
 int sigaction(int signum, struct sigaction* act, struct sigaction* oldact);
 ```
 
@@ -2295,18 +2385,23 @@ pause();
 
 然而这段代码有严重的竞争条件，如果**在 `while` 之后、`pause` 之前收到 $\text{SIGCHLD}$，那么 `pause` 会使进程永远休眠**。
 
-另一种方案用 `sleep` 替换 `pause`。它的问题是**太慢了**。如果在 `while` 之后、`pause` 之前收到信号，程序需要等较长时间才能再次检查 `pid`。换用 `nanosleep` 也不能解决问题：太短的休眠间隔太浪费，太大的休眠间隔又太慢。
+另一种方案用 `sleep` 替换 `pause`。它的问题是**太慢了**。如果在 `while` 之后、`sleep` 之前收到信号，程序需要等较长时间才能再次检查 `pid`。换用 `nanosleep` 也不能解决问题：太短的休眠间隔太浪费，太大的休眠间隔又太慢。
 
 合适的解决方法是使用 `sigsuspend`：
 
 ```c
 #include <signal.h>
 
-// 暂时用 mask 替换当前的阻塞集合，然后挂起调用进程，直到收到一个信号
-// 如果信号行为是终止，那么该进程不从 sigsuspend 返回，直接终止
-// 如果信号行为是调用处理程序，那么 sigsuspend 从处理程序返回，恢复调用 sigsuspend 时原有的阻塞集合
+// 返回：-1
 int sigsuspend(const sigset_t* mask);
+```
 
+`sigsuspend` **暂时用 `mask` 替换当前的阻塞集合，然后挂起调用进程，直到收到一个信号**：
+
+- 如果信号行为是**终止**，那么该进程不从 `sigsuspend` 返回，**直接终止**
+- 如果信号行为是**调用处理程序**，那么 `sigsuspend` **从处理程序返回**，恢复调用 `sigsuspend` 时原有的 `blocked` 位向量
+
+```c
 // 调用 sigsuspend 就如同**原子地**执行：
 sigprocmask(SIG_SETMASK, &mask, &prev);
 pause();
@@ -2316,7 +2411,6 @@ sigprocmask(SIG_SETMASK, &prev, NULL);
 原子属性保证在等价代码中，对 `sigprocmask` 和 `pause` 的调用是连续的，不会被中断，从而消除了潜在的竞争。
 
 ```c
-
 int main(int argc, char** argv) {
     sigset_t mask, prev;
 
@@ -2356,10 +2450,10 @@ C 提供了一种用户级异常控制流形式，称为**非本地跳转**（no
 ```c
 #include <setjmp.h>
 
-// 在 env 中保存当前的调用环境以供 longjmp 使用，然后返回 0
+// 返回：若直接调用，返回 0；若从 longjmp 返回，返回非 0
 int setjmp(jmp_buf env);
 
-// 从 env 中恢复调用环境，并返回到最近一次初始化 env 的 setjmp，然后 setjmp 以非零返回值 retval 返回
+// 返回：返回到 setjmp
 void longjmp(jmp_buf env, int val);
 
 // setjmp 和 longjmp 的可以被信号处理程序使用的版本
@@ -2367,9 +2461,13 @@ int sigsetjmp(sigjmp_buf env, int savesigs);
 void siglongjmp(sigjmp_buf env, int val);
 ```
 
+`setjmp` 在 `env` 中保存当前的调用环境，以供 `longjmp` 使用，然后返回零。
+
+`longjmp` 从 `env` 中恢复调用环境，并返回到最近一次初始化 `env` 的 `setjmp`，这个 `setjmp` 将会返回非零值。
+
 **调用环境**包括程序计数器、栈指针和通用目的寄存器。
 
-`setjmp` 的返回值不能赋值给变量，但它可以用在 `switch` 或条件语句的测试中：
+`setjmp` 的返回值**不能赋值给变量**，但它可以用在 `switch` 或条件语句的测试中：
 
 ```c
 rc = setjmp(env);      // error!
@@ -2470,15 +2568,252 @@ int main() {
 
 # 虚拟内存
 
+## 物理和虚拟寻址
+
+主存被组织成一个由 $M$ 个连续的字节大小的单元的数组，每个字节都拥有一个唯一的物理地址（Physical Address, PA）。
+
+CPU 直接使用物理地址寻址的方式就是**物理寻址**（physical addressing）。在物理寻址模型中，CPU 加载数据时生成一个有效的物理地址，将它通过**内存总线**传递给主存，主存取出对应数据，并将其返回给 CPU 寄存器。
+
+早期 PC、数字信号处理器、嵌入式微处理器和 Cray 超级计算机使用物理寻址。
+
+现代处理器使用**虚拟寻址**（virtual addressing）。在虚拟寻址模型中，CPU 生成一个**虚拟地址**（Virtual Address, VA），将它经过**地址翻译**（address translation）转换成一个有效的物理地址，然后将其通过内存总线传递给主存。
+
+地址翻译需要硬件和操作系统紧密配合，CPU 芯片上的**内存管理单元**（Memory Management Unit, **MMU**）负责执行地址翻译，它利用存放在主存中的查询表动态翻译虚拟地址，该表的内容由操作系统管理。
+
+## 地址空间
+
+**地址空间**（address space）是一个**非负整数**地址的有序集合。
+
+如果地址空间的整数是连续的，那么它是一个**线性地址空间**（linear address space）。我们总假设地址空间是线性的。
+
+在带虚拟内存的系统中，CPU 从一个有 $N=2^n$ 个地址的地址空间中生成虚拟地址，其中的地址从 $0$ 到 $M-1$ 编号。这个地址空间被称为**虚拟地址空间**（Virtual Address Space, **VAS**）。
+
+$n$ 称为**虚拟地址空间的位数**（virtual address space size），它决定了虚拟地址空间的大小。
+
+物理地址从 $0$ 到 $M-1$ 编号，构成了一个**物理地址空间**（Physical Address Space, **PAS**）。我们假设物理地址空间的大小是 $2$ 的位数次幂，即 $2^n$ 字节。
+
+## 虚拟内存作为缓存的工具
+
+概念上，虚拟内存被组织为一个存放在磁盘上的 $N$ 个连续字节大小的单元的数组，它被缓存在主存中。
+
+VM 系统将虚拟内存分割成**虚拟页**（Virtual Page, VP），每个虚拟页都包含 $P=2^p$ 个字节。
+
+类似地，物理内存被分割成**物理页**（Physical Page, PP），每个物理页也包含 $P$ 个字节，物理页也称为**页帧**（page frame）。
+
+一个虚拟页有三种状态：
+
+- **未分配**（unallocated）：VM 系统还未**分配**（创建）的页。它不与任何数据关联，不占用磁盘空间。
+- **缓存**（cached）：**已缓存在物理内存中**的已分配页。
+- **未缓存**（uncached）：**未缓存在物理内存中**的已分配页。
+
+![](images/9-3-VM使用主存作为缓存.png)
+
+### DRAM 缓存的组织结构
+
+我们用 SRAM 缓存指 CPU 的 L1、L2 和 L3 缓存，用 DRAM 缓存指主存。
+
+DRAM 比 SRAM 慢约 $10$ 倍，但磁盘比 DRAM 慢约 $100000$ 多倍，而且从磁盘的一个扇区读取第一个字节的时间开销比起读这个扇区中连续的字节又要慢约 $100000$ 倍，因此，DRAM 缓存的组织结构完全是由巨大的不命中处罚驱动的。
+
+**虚拟页往往很大**，通常为 $4 \operatorname{KB}\sim 2 \operatorname{MB}$。
+
+DRAM 是**全相联**的，即任何虚拟页都可以放置在任何物理页中。
+
+操作系统对 DRAM 缓存使用**更复杂精密的替换算法**。
+
+DRAM 缓存总是**写回**，而不是直写。
+
+### 页表
+
+VM 系统需要判定一个虚拟页是否已缓存、已缓存的虚拟页对应的物理页、未缓存的虚拟页对应的磁盘位置等，这些功能由操作系统、MMU 中的地址翻译硬件和常驻在物理内存中的**页表**（page table）提供。
+
+页表是一个**页表条目**（Page Table Entry, **PTE**）数组。
+
+虚拟地址空间的每个页在页表的**固定**偏移处都有一个 PTE。PTE 由一个**有效位**（valid bit）和一个 $n$ 位的**地址字段**组成。
+
+有效位指示对应的虚拟页是否已缓存。若有效位被设置，地址字段就指示 **DRAM 缓存中对应的物理页的地址**；否则，如果地址字段是**空**的，则说明虚拟页**未分配**；如果地址字段是**非空**的，则虚拟页**已分配**，地址字段是**虚拟页在磁盘上的位置**。
+
+页表将虚拟页映射到物理页，每次地址翻译时，都会被地址翻译硬件读取。
+
+![](images/9-4-页表.png)
+
+### 页命中
+
+CPU 试图读取 VP 2 中的字时，地址翻译硬件将虚拟地址作为索引定位 PTE 2。PTE 2 的有效位被设置，故 VP 2 已被缓存在 DRAM 中，这是一次**页命中**。地址翻译硬件使用 PTE 2 的地址字段（即 PP 1 的地址）构造出这个字的物理地址。
+
+### 缺页
+
+DRAM 缓存不命中称为**缺页**（page fault）。
+
+CPU 试图读取 VP 3 中的字时，由于 VP 3 未缓存，会触发一个**缺页异常**。这调用内核的**缺页异常处理程序**，它选择**牺牲**一个页，此例中就是 VP 4。如果 VP 4 已经被修改了，那么内核会将它复制回磁盘（写回）。内核会修改 VP 4 的页表条目，将其有效位清零。
+
+然后，内核从磁盘复制 VP 3 到内存中的 PP 3（即 VP 4 的原缓存位置），更新 PTE 3 并返回。缺页处理程序返回时，会**重新执行引起缺页的指令**，这一次会页命中。
+
+![](images/9-6-缺页.png)
+
+虚拟内存在 20 世纪 60 年代早期发明，早于 SRAM 缓存（后者由于 CPU-内存之间差距的加大诞生），因此其术语和 SRAM 缓存的术语不同。
+
+虚拟内存的说法中，**块**称作**页**，页在磁盘和内存之间传送的活动叫做**交换**（swapping）或**页面调度**（paging）。页从磁盘**换入**（swapped in / paged in）DRAM，从 DRAM **换出**（swapped out / paged out）磁盘。
+
+一直到不命中发生时才换入页面的策略称为**按需页面调度**（demand paging），所有现代系统都采用这种策略。
+
+### 分配页面
+
+![](images/9-8-分配页面.png)
+
+此例中，操作系统分配 VP 5：在磁盘上创建空间，并更新 PTE 5，将其地址字段填充为 VP 5 在磁盘上的位置。
+
+### 又是局部性救了我们
+
+局部性保证了程序在任意时刻都趋向于在一个较小的**活动页面**（active page）集合上工作，即程序的**工作集**（working set）或**常驻集合**（resident set），这使得虚拟内存系统的性能很好。
+
+如果工作集大小超出了物理内存的大小，那么程序将会**抖动**（thrashing），严重降低性能。
+
+可以用 Linux 的 `getrusage` 函数检测缺页的数量。
+
+## 虚拟内存作为内存管理的工具
+
+虚拟地址空间通常比物理地址空间大，但在一些早期系统（DEC PDP-11/70），也可能比物理地址空间小。虚拟内存对这种系统也有用处。
+
+操作系统为每个进程提供了独立的页表，每个进程都有自己独立的虚拟地址空间。多个虚拟页可以映射到同一个物理页，这称为**共享**（sharing）。
+
+通过使用 VM 系统：
+
+**链接**被简化：每个进程拥有独立的地址空间，因此它们不用在意代码和数据实际存放在物理内存的何处，可以使用**相同格式的内存映像**。这使得链接过程被简化，允许链接器生成完全链接的可执行文件。
+
+**加载**被简化：加载时，Linux 加载器为代码和数据段**分配虚拟页**，并将它们标记成**未缓存**的，将页表条目的地址字段设置成**磁盘上目标文件的位置**。加载器不会把数据从磁盘复制到内存，VM 系统会自动完成这一过程。
+
+**内存映射**（memory mapping）：将一组连续的虚拟页映射到某个文件中的某个位置
+
+**共享**被简化：每个进程拥有私有的代码、数据、堆、栈，它们不和其他进程共享，会被操作系统映射到**不交**的物理页中。而对于内核代码、C 标准库代码等需要被各个进程共享的代码，操作系统通过**将不同进程中的某些虚拟页映射到相同的物理页**，从而使得多个进程可以共享这部分代码的一个副本。
+
+**内存分配**被简化：当一个运行在用户进程的程序要求额外的堆空间时（如调用 `malloc`），操作系统分配一些连续的虚拟页，并将它们映射到相同数目的物理页，这些**物理页可以散落在物理内存的任意位置**（不必连续）。
+
+## 虚拟内存作为内存保护的工具
+
+对内存系统的访问必须被控制：用户进程不能修改它的只读代码段，不能读或写内核代码和数据结构，不能读或写其他进程的私有空间，不能写与其他进程共享的虚拟页（除非得到所有共享者显式的允许）
+
+我们在 PTE 上添加一些额外的**许可位**，用于控制对虚拟页的访问：
+
+- SUP 位：进程是否必须运行在**内核模式**下才能访问这个虚拟页
+- READ 位：进程是否可以读取这个虚拟页
+- WRITE 位：进程是否可以写这个虚拟页
+
+![](images/9-10-内存保护.png)
+
+如果指令违反了这些许可位规定的许可条件，CPU 就会触发一个**一般保护故障**，将控制转移到内核的**一般保护异常处理程序**，它会终止进程。Linux 将这种异常报告为**段错误**（segmentation fault）
+
+## 地址翻译
+
+地址翻译是一个从虚拟地址空间（VAS）到物理地址空间（PAS）的映射：
+
+$$
+\begin{gather*}
+    \operatorname{MAP}: \operatorname{VAS}\rightarrow\operatorname{PAS}\cup\varnothing, \\
+    \operatorname{MAP}(A) = \begin{cases}
+        A', & \text{if data at virtual addr. $A$ are present at physical addr. $A'$} \\
+        \varnothing, & \text{if data at virtual addr. $A$ are not present in physical memory}
+    \end{cases}
+\end{gather*}
+$$
+
+CPU 中的一个控制寄存器，**页表基址寄存器**（Page Table Base Register, **PTBR**），指向当前页表的起始位置。
+
+![](images/9-12-地址翻译.png)
+
+地址翻译时，**处理器先生成一个虚拟地址**，并将其传送给 MMU。
+
+$n$ 位的虚拟地址被划分为两个部分：
+
+- $p$ 位的**虚拟页偏移量**（Virtual Page Offset, **VPO**）：用于在虚拟页内定位字
+- $n-p$ 位的**虚拟页号**（Virtual Page Number, **VPN**）：作为索引，在页表中定位 PTE 
+
+**MMU 通过 VPN 定位目标 PTE 的地址**，然后向高速缓存或主存请求此 PTE。得到 PTE 后，MMU 检查有效位：
+
+如果有效位为 $1$，这是一次**页命中**。MMU 就会从 PTE 中取出**物理页号**（Physical Page Number, **PPN**）。由于**物理页偏移量**（Physical Page Offset, **PPO**）等于 VPO，因此将 PPN 和 VPO 组合起来就得到了物理地址。
+
+MMU 将物理地址传送给高速缓存或主存，高速缓存或主存向处理器返回对应的字，就完成了整个过程。
+
+![](images/9-13-页命中和缺页.png)
+
+如果有效位为 $0$，MMU 触发一个**缺页异常**，CPU 将控制传递给内核的缺页异常处理程序。
+
+缺页处理程序确定出牺牲页（如果牺牲页已被修改，就将它**写回**磁盘），然后调入新的页，并更新内存中相应的 PTE。最后，缺页处理程序返回到引起缺页的指令，并重新执行它，这一次会页命中。
+
+**页命中完全由硬件处理**，**而缺页则由硬件和内核协作处理**。
+
+### 结合高速缓存和虚拟内存
+
+![](images/9-14-VM和cache.png)
+
+大部分（同时使用 VM 和 SRAM 高速缓存的）系统使用**物理寻址**来索引 SRAM 高速缓存，这使得多个进程同时在高速缓存中缓存块更容易，也使得共享来自相同虚拟页的块更容易。而且，这使得高速缓存不用烦恼内存保护的问题，这会在地址翻译的过程中处理。
+
+注意，页表条目也可以被缓存在高速缓存中。
+
+### 利用 TLB 加速地址翻译
+
+每次 CPU 产生一个虚拟地址，MMU 就需要查阅一个 PTE，这是一个**内存操作**，如果缓存不命中的话会很慢。
+
+MMU 中可能包括一个存储 PTE 的小缓存，称为**翻译后备缓冲区**（Translation Lookaside Buffer, **TLB**）。TLB 的**相联度一般较高**，因此出现抖动的可能性较小。
+
+TLB 是**虚拟寻址**的，VPN 被分成 **TLB 标记位**和 **TLB 索引位**两部分。
+
+![](images/9-15-16-TLB.png)
+
+### 多级页表
+
+如果我们有一个 $32$ 位的地址空间，页大小为 $4 \operatorname{KB}$，那么页表就需要 $2^{32}/2^{12}=2^{20}$ 个 PTE，每个 PTE 需要 $4$ 个字节，总共就需要 $4 \operatorname{MB}$ 的内存空间，这太大了。
+
+我们使用多级页表来压缩空间。以一个二级页表为例：
+
+一级页表包含 $2^{10}$ 个 PTE，每个 PTE 指向一个二级页表。二级页表包含 $2^{10}$ 个 PTE，每个 PTE 对应一个虚拟页。使用 $4$ 字节的 PTE 时，一级页表和每个二级页表的大小都是 $4 \operatorname{KB}$，恰好与一个页的大小相同。
+
+一级页表的每个 PTE 对应虚拟地址空间中一个 $4 \operatorname{MB}$ 的**片**（chunk）。如果片 $i$ 中**所有**的页都是**未分配**的，那么一级 PTE $i$ 为空。
+
+多级页表从两个方面节约了内存：
+
+- 如果一级页表的某个 PTE 为空，那么**相应的二级页表就不会存在**。由于对典型的程序来说，虚拟地址空间的大部分都是未分配的，因此这是一种巨大的节约
+- 只有一级页表和最经常使用的二级页表需要被缓存在主存中
+
+![](images/9-17-多级页表.png)
+
+对于 $k$ 级页表，虚拟地址被划分成 $k$ 个 VPN 和 $1$ 个 VPO。VPN $i$ 是到第 $i$ 级页表的索引，而第 $i$ 级页表的每个 PTE 都指向第 $i+1$ 级页表的基址（第 $k$ 级页表除外）。和单级页表一样，PPO 和 VPO 是相同的。
+
+### 综合：端到端的地址翻译
+
+假设：
+
+- 内存按字节寻址
+- 内存访问针对单字节的字
+- 虚拟地址 $n=14$ 位长
+- 物理地址 $m=12$ 位长
+- 页大小为 $P=64$ 字节
+- TLB 四路组相联，总共有 $16$ 个条目
+- L1 d-cache 物理寻址、直接映射，行大小是 $4$ 字节，总共有 $16$ 组
+
+因为页大小为 $64$ 字节，所以 VPO 有 $6$ 位，VPN 有 $8$ 位。
+
+- **TLB** 将 VPN 的高 $6$ 位作为标记位（TLBT），将 VPN 的低 $2$ 位作为索引位（TLBI）
+- **页表**是单级的，有 $2^8=256$ 个 PTE。
+- **高速缓存**将物理地址的低 $2$ 位作为块偏移（CO），中间 $4$ 位作为组索引（CI），高 $6$ 位作为标记位（CT）
+
+![](images/9-20-端到端.png)
+
+## 案例研究：Intel Core i7/Linux 内存系统
+
+
+
+
 # 系统级 I/O
 
 I/O 是在主存和外部设备（磁盘驱动、终端、网络）之间复制数据的过程。
 
 ## Unix I/O
 
-一个 Linux **文件**是一个 $m$ 字节的序列，一切 I/O 设备都被视为文件，而所有的 I/O 操作都被视为对文件的读和写。这种优雅的映射使得 Linux kernel 可以提供一个简单且底层的应用程序接口，称为 Unix I/O。
+一个 Linux **文件**是一个 $m$ 字节的序列。
 
-**打开文件**：应用程序通过要求内核打开相应的文件来宣告它想要访问某个 I/O 设备。内核返回一个**文件描述符**（file descriptor），它是**非负整数**。文件描述符标识此文件。内核维护有关此已打开文件的所有信息，应用程序只需要保存文件描述符
+Linux 中，一切 I/O 设备都被视为文件，而所有的 I/O 操作都被视为对文件的读和写。这种优雅的映射使得 Linux 内核可以提供一个简单且底层的应用程序接口，称为 Unix I/O。
+
+**打开文件**：应用程序通过要求内核打开相应的文件来宣告它想要访问某个 I/O 设备。内核返回一个用于标识对应文件的**文件描述符**（file descriptor），它是**非负整数**。内核维护有关此已打开文件的所有信息，应用程序只需要保存文件描述符。
 
 Linux shell 创建的每个进程，在开始时都有三个已打开的文件：
 
@@ -2495,21 +2830,21 @@ STDOUT_FILENO    // standard output
 STDERR_FILENO    // standard error
 ```
 
-**改变当前的文件位置**：对于每个已打开文件，内核维护一个文件位置 $k$，初始值为 0，表示**从文件开头起的字节偏移量**。应用程序可以通过 `seek` 操作显式地设置文件的当前位置
+**改变当前的文件位置**：对于每个已打开文件，内核维护一个**文件位置** $k$，初始值为 0，表示**从文件开头起的字节偏移量**。应用程序可以通过 `seek` 操作显式地设置文件的当前位置
 
 **读写文件**：
 
-- 读就是从当前文件位置 $k$ 起复制 $n>0$ 个字节到主存，然后将 $k$ 增加到 $k+n$。若文件大小为 $m$ 字节，则当 $k\geq m$ 时读操作会触发 EOF 条件。文件末尾并没有明确的 EOF 字符。
+- 读就是从当前文件位置 $k$ 起复制 $n>0$ 个字节到主存，然后将 $k$ 增加到 $k+n$。若文件大小为 $m$ 字节，则当 $k\geq m$ 时读操作会**触发 EOF 条件**（文件末尾并没有明确的 EOF 字符）
 - 类似地，写就是从主存复制 $n>0$ 个字节到当前文件位置 $k$，然后更新 $k$
 
-**关闭文件**：应用程序通过要求内核关闭文件来指明它已经完成了对某个文件的访问。内核释放文件打开时创建的数据结构，将描述符恢复到可用的描述符池。无论进程因何终止，内核都会关闭所有打开的文件，并释放它们的内存
+**关闭文件**：应用程序通过要求内核关闭文件来指明它已经完成了对此文件的访问。内核释放文件打开时创建的数据结构，将描述符恢复到可用的描述符池。无论进程因何终止，内核都会关闭所有打开的文件，并释放它们的内存
 
 ## 文件
 
 Linux 文件有一个**类型**（type），包括：
 
-- **普通文件**（regular file）：包含任意数据，在 `ls` 里用 `-` 指示。应用程序经常需要区分文本文件（只含有 ASCII 或 Unicode 字符的普通文件）和二进制文件（所有非文本文件）。对内核来说，文本文件和二进制文件没有区别
-- **目录**（directory）：包含一组**链接**（link）的文件名，每个链接都将一个文件名映射到一个文件（可以也是目录），在 `ls` 里用 `d` 指示。每个目录至少含有两个条目：`.` 是到目录自身的链接，`..` 是到父目录的链接
+- **普通文件**（regular file）：包含任意数据，在 `ls` 里用 `-` 指示。应用程序经常需要区分**文本文件**（只含有 ASCII 或 Unicode 字符的普通文件）和**二进制文件**（所有非文本文件）。对内核来说，文本文件和二进制文件没有区别
+- **目录**（directory）：包含一组**链接**（link）的文件，每个链接都将一个文件名映射到一个文件（可以也是目录），在 `ls` 里用 `d` 指示。每个目录至少含有两个条目：`.` 是到目录自身的链接，`..` 是到父目录的链接
 - **套接字**（socket）：用于进程间的跨网络通信
 - 其他文件类型：命名通道（named pipe）、符号链接（symbolic link）、字符和块设备（character and block device）
 
@@ -2526,8 +2861,8 @@ Linux 内核将所有文件组织成一个**目录层次结构**（directory hie
 #include <sys/stat.h>
 #include <fcntl.h>
 
-// 打开路径名 filename 的文件，返回其文件描述符
-// 如果出错，则返回 -1
+// 打开路径名 filename 的文件
+// 返回：若成功，返回文件描述符；若出错，返回 -1
 int open(char* filename, int flags, mode_t mode);
 ```
 
@@ -2543,15 +2878,17 @@ int open(char* filename, int flags, mode_t mode);
 
 - $\text{O\_CREAT}$：如果文件不存在，则创建它的一个**截断的**文件（即创建一个大小为 `0` 的空文件）
 - $\text{O\_TRUNC}$：如果文件存在，就**截断**它。**这会导致文件内容丢失**！
-- $\text{O\_APPEND}$：每次写时都追加到文件的尾端（设置当前文件位置为文件结尾）
+- $\text{O\_APPEND}$：每次写时都追加到文件的末尾（设置当前文件位置为文件末尾）
+
+注意：没有 $\text{O\_RDONLY}\mid\text{O\_WRONLY}$ 这种东西，使用 $\text{O\_RDWR}$。
 
 **截断**（truncate）：是置空（empty）的同义词，清除文件内容，但不删除文件。文件大小会被置为零。
 
-`mode` 参数**只有在创建文件时**才有意义，指定了新文件的**访问权限**（access permission）：
+`mode` 参数**只有在创建文件时**才有意义，它指定新文件的**访问权限**（access permission）：
 
-- $\text{S\_IRUSR}$：User/owner 可读
-- $\text{S\_IWUSR}$：User/owner 可写
-- $\text{S\_IXUSR}$：User/owner 可执行
+- $\text{S\_IRUSR}$：Owner 可读
+- $\text{S\_IWUSR}$：Owner 可写
+- $\text{S\_IXUSR}$：Owner 可执行
 - $\text{S\_IRGRP}$：Owner's group 可读
 - $\text{S\_IWGRP}$：Owner's group 可写
 - $\text{S\_IXGRP}$：Owner's group 可执行
@@ -2559,25 +2896,27 @@ int open(char* filename, int flags, mode_t mode);
 - $\text{S\_IWOTH}$：Others 可写
 - $\text{S\_IXOTH}$：Others 可执行
 
-每个进程都有一个 `umask`，它是通过调用 `umask` 函数来设置的，是**进程上下文的一部分**。
+每个进程都有一个 `umask`，它是通过调用 `umask` 函数来设置的，它是**进程上下文的一部分**。
 
 ```c
 #define DEF_MODE S_IRUSR | S_IWUSR | S_IRGRP | S_IWGRP | S_IROTH | S_IWOTH
 #define DEF_UMASK S_IWGRP | S_IWOTH
 
 umask(DEF_UMASK);    // set process's umask
-fd = open(filename, O_CREAT | O_TRUNC | O_WRONLY, DEF_MODE);    // permissions set to mode & ~umask
-// fd's permissions:
+fd = open(filename, O_CREAT | O_TRUNC | O_WRONLY, DEF_MODE);    // permissions will be set to mode & ~umask
+// fd's permissions: rw-r--r--
 ```
 
-新文件的权限位是 `mode & ~umask`，即 `umask` 中置位的权限位会被屏蔽，总是被置零。
+新文件的权限位是 `mode & ~umask`，`umask` 中置位的权限位会被屏蔽，总是被置零。
 
 `close` 函数关闭文件。**关闭已经关闭的文件会出错**。
 
 ```c
 #include <unistd.h>
 
-int close(int fd);    // 关闭文件
+// 关闭文件
+// 返回：若成功，返回 0；若出错，返回 -1
+int close(int fd);    
 ```
 
 ## 读和写文件
@@ -2600,8 +2939,8 @@ ssize_t write(int fd, const void* buf, size_t n);
 
 有时，`read` 和 `write` 传送的字节比应用程序要求的少，此时的返回值称为**不足值**（short count），原因有：
 
-- **读时遇到 EOF**：文件从当前文件位置其只剩 20 字节，我们却要求读 50 字节，那么此次调用 `read` 就会返回 20，下次调用 `read` 就会返回 0（EOF）。
-- **从终端读文本行**：如果打开文件和终端相关联（键盘和显示器），那么每个 `read` 函数将**一次传送一个文本行**，返回的不足值是文本行的大小
+- **读时遇到 EOF**：文件从当前文件位置起只剩 20 字节，我们却要求读 50 字节，那么此次调用 `read` 就会返回 20，下次调用 `read` 就会返回 0（EOF）。
+- **从终端读文本行**：如果打开的文件和终端相关联（如键盘和显示器），那么每个 `read` 函数将**一次传送一个文本行**，返回的不足值是文本行的大小
 - **读写网络套接字**（socket）：如果打开的文件对应于网络套接字，那么内部缓冲约束和较长的网络延迟会引起 `read` 和 `write` 返回不足值。
 
 除 EOF 以外，读写磁盘文件时不会遇到不足值。
@@ -2620,7 +2959,7 @@ RIO 提供了：
 ```c
 #include "csapp.h"
 
-// 从 fd 的当前文件位置复制至多 n 个字节到 buf
+// 从 fd 的当前文件位置直接复制至多 n 个字节到 buf
 ssize_t rio_readn(int fd, void* usrbuf, size_t n) {
     size_t nleft = n;
     ssize_t nread;
@@ -2640,7 +2979,7 @@ ssize_t rio_readn(int fd, void* usrbuf, size_t n) {
     return (n - nleft);  // return >= 0
 }
 
-// 从 buf 复制 n 个字节到 fd 的当前文件位置
+// 从 buf 直接复制 n 个字节到 fd 的当前文件位置
 ssize_t rio_writen(int fd, void* usrbuf, size_t n) {
     size_t nleft = n;
     ssize_t nwritten;
@@ -2660,16 +2999,22 @@ ssize_t rio_writen(int fd, void* usrbuf, size_t n) {
 }
 ```
 
-`rio_readn` 只会在 EOF 情形下返回不足值，`rio_writen` 从不返回不足值。对同一个描述符，可以任意地交错调用 `rio_readn` 和 `rio_writen`。
+`rio_readn` **只会在 EOF 情形下返回不足值**，`rio_writen` **从不返回不足值**。
 
-如果 `rio_readn` 和 `rio_writen` 被一个**从应用信号处理程序地返回**中断，那么它们会显式地重启 `read` 和 `write` 函数。为了可移植性，我们允许被中断的系统调用，在必要时重启它们。
+对同一个描述符，可以任意地交错调用 `rio_readn` 和 `rio_writen`。
+
+如果 `rio_readn` 和 `rio_writen` 被一个**从应用信号处理程序的返回**中断，那么它们会显式地重启 `read` 和 `write` 函数。为了可移植性，我们允许被中断的系统调用，在必要时重启它们。
 
 ### RIO 的带缓冲的输入函数
+
+带缓冲区的 I/O 函数可以提高性能，例如我们下面的 `rio_read` 一次性从
 
 ```c
 #include "csapp.h"
 
 #define RIO_BUFSIZE 8192
+
+// Internal buffer data structure
 typedef struct {
     int rio_fd;                // descriptor for this internal buf
     int rio_cnt;               // unread bytes in internal buf
@@ -2677,28 +3022,31 @@ typedef struct {
     char rio_buf[RIO_BUFSIZE]; // internal buffer
 } rio_t;
 
-// 将描述符 fd 注册为一个 `rio_t` 对象。
+// Helper function
+// Initializes internal buffer
 void rio_readinitb(rio_t* rp, int fd) {
     rp->rio_fd = fd;
     rp->rio_cnt = 0;
     rp->rio_bufptr = rp->rio_buf;
 }
 
-// Linux read 函数的带缓冲的版本，是 RIO 包内部函数
+// Helper function
+// Read up to n bytes from internal buf to usrbuf
+// Automatically refills when buf is empty
 static ssize_t rio_read(rio_t* rp, char* usrbuf, size_t n) {
     int cnt;
 
     while (rp->rio_cnt <= 0) {  // refill if buf is empty
         rp->rio_cnt = read(rp->rio_fd, rp->rio_buf, sizeof(rp->rio_buf));
 
-        if (rp->rio_cnt < 0) {
-            if (errno != EINTR)  // interrupted by sig handler return
+        if (rp->rio_cnt < 0) {sig handler return
+            if (errno != EINTR)  // interrupted by 
                 return -1;
         }
         else if (rp->rio_cnt == 0)  // EOF
             return 0;
         else
-            rp->rio_bufptr = rp->rio_buf;  // reset buffer ptr
+            rp->rio_bufptr = rp->rio_buf;  // reset buffer ptr to the beginning of the buffer
     }
 
     // copy min(n, rp->rio_cnt) bytes from internal buf to user buf
@@ -2711,18 +3059,18 @@ static ssize_t rio_read(rio_t* rp, char* usrbuf, size_t n) {
     return cnt;
 }
 
-// 从 rp 读出下一个文本行（包括换行），将它复制到 usrbuf，并追加 NULL 字符，返回读到的行数
-// 最多读 maxlen - 1 个字节，余下的一个字节留给 NULL，文本行中多出的字节被丢弃
+// Read a whole line (of at most maxlen bytes) from internal buffer to usrbuf
 ssize_t rio_readlineb(rio_t* rp, void* usrbuf, size_t maxlen) {
-    int n, rc;
-    char c;
+    int n;     // num of lines read
+    int rc;    // char read by rio_read
+    char c; 
     char* bufp = usrbuf;
 
     for (n = 1; n < maxlen; n++) {
         if ((rc = rio_read(rp, &c, 1)) == 1) {    // read 1 byte
             *bufp++ = c;
             if (c == '\n') {
-                n++;
+                n++;    
                 break;
             }
         } else if (rc == 0) {
@@ -2733,11 +3081,11 @@ ssize_t rio_readlineb(rio_t* rp, void* usrbuf, size_t maxlen) {
         } else
             return -1;     // error
     }
-    *bufp = 0;
+    *bufp = 0;    // Append a NULL byte to the end of usrbuf
     return n - 1;
 }
 
-// 从 rp 读至多 n 字节到 usrbuf
+// Read up to n bytes from internal buffer to usrbuf
 ssize_t rio_readnb(rio_t* rp, void* usrbuf, size_t n) {
     size_t nleft = n;
     ssize_t nread;
@@ -2745,17 +3093,14 @@ ssize_t rio_readnb(rio_t* rp, void* usrbuf, size_t n) {
 
     while (nleft > 0) {
         if ((nread = rio_read(rp, bufp, nleft)) < 0) {
-            if (errno == EINTR)  // interrupted by sig handler return
-                nread = 0;       // and call read() again
-            else
-                return -1;       // errno set by read()
+            return -1;           // errno set by read()
         } else if (nread == 0)   // EOF
             break;
         nleft -= nread;
         bufp += nread;
     }
     return (n - nleft);  // return >= 0
-}  // 其实现和 rio_readn 几乎一样
+}
 ```
 
 对同一描述符，**对以上两个带缓冲的输入函数的调用可以任意交错进行**，但是对带缓冲的输入函数的调用**不应和无缓冲的 `rio_readn` 函数交错调用**
@@ -2785,7 +3130,7 @@ struct stat {
     time_t st_ctime;      // time of last status change
 };
 
-// 这两个函数以路径名或文件描述符作为输入，将文件元数据填充在 buf 参数中
+// 这两个函数分别以路径名和文件描述符为输入，将文件元数据填充在 buf 参数中
 // 返回：若成功则返回 0，若出错则返回 -1
 int stat(const char* filename, struct stat* buf);
 int fstat(int fd, struct stat* buf);
@@ -2797,6 +3142,8 @@ int fstat(int fd, struct stat* buf);
 ```c
 #include <sys/stat.h>
 
+mode_t m = buf.st_mode;
+
 // 确定 st_mode 指示的文件类型的宏谓词
 S_ISREG(m)    // is this a regular file?
 S_ISDIR(m)    // is this a directory file?
@@ -2805,6 +3152,8 @@ S_ISSOCK(m)    // is this a network socket?
 
 ```c
 #include "csapp.h"
+
+// Usage: ./showstat <filename>
 
 int main(int argc, char** argv) {
     struct stat stat;
@@ -2828,30 +3177,34 @@ int main(int argc, char** argv) {
 
 ## 读取目录内容
 
-**目录流**（directory stream）是对一个有序列表的抽象，此处就是一个目录中的文件列表。
+**流**是对一个有序列表的抽象，**目录流**（directory stream）就是一个目录中文件的列表。
 
 ```c
 #include <sys/types.h>
 #include <dirent.h>
 
-// 打开目录，返回一个指向目录流的指针，出错返回 NULL
+// 打开目录
+// 返回：若成功则返回指向目录流的指针，若出错则返回 NULL
 DIR* opendir(const char* name);
 
+// 目录的项
 struct dirent {
     ino_t d_ino;       // inode number
     char d_name[256];  // null-terminated filename
+    // ...
 };
 
-// 返回指向流 dirp 中下一个目录项的指针
-// 如果没有更多的目录项 返回 NULL
-// 如果出错 返回 NULL 并设置 errno
+// 读取目录中的下一项
+// 返回：指向目录中下一项的指针，若已到达目录尾或出错则返回 NULL
+// 如果出错，还会设置 errno
 struct dirent* readdir(DIR* dirp);
 
-// 关闭目录流并释放资源，成功返回 0，出错返回 -1
+// 关闭目录流并释放资源
+// 返回：若成功则返回 0，若出错则返回 -1
 int closedir(DIR* dirp);
 ```
 
-区分 `readdir` 调用出错和流结束情况的唯一方法是检查 `errno` 是否被修改。
+区分 `readdir` 调用出错和流结束情况的**唯一**方法是检查 `errno` 是否被修改。
 
 ```c
 #include "csapp.h"
@@ -2869,7 +3222,7 @@ int main(int argc, char** argv) {
     if (errno != 0)
         unix_error("readdir error");
 
-    closedir(streamp);
+    Closedir(streamp);
     exit(0);
 }
 ```
@@ -2897,6 +3250,7 @@ int main(int argc, char** argv) {
 
 // 用描述表表项 oldfd 覆写描述符表表项 newfd
 // 如果 newfd 已经打开，dup2 会在覆写前将其关闭
+// 返回：若成功则返回 newfd，若出错则返回 -1 并设置 errno
 int dup2(int oldfd, int newfd);
 ```
 
@@ -2945,7 +3299,7 @@ fpout = fdopen(sockfd, "w");
 // 这又要求应用程序必须对两个流都调用 fclose，从而释放两个流的内存资源
 fclose(fpin);
 fclose(fpout);
-// 由于 sockfd 已经被关系，所以第二次 fclose 会失败
+// 由于 sockfd 已经被关闭，所以第二次 fclose 会失败
 // 对顺序的程序，这不是问题。
 // 但是在线程化的程序中关闭一个已关闭的描述符会导致灾难
 // 因此：不要在网络套接字上使用标准 I/O 函数，换用 RIO 函数完成 I/O 操作
