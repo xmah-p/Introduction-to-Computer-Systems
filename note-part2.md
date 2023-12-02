@@ -94,6 +94,38 @@
     - [多级页表](#多级页表)
     - [综合：端到端的地址翻译](#综合端到端的地址翻译)
   - [案例研究：Intel Core i7/Linux 内存系统](#案例研究intel-core-i7linux-内存系统)
+    - [Core i7 地址翻译](#core-i7-地址翻译)
+    - [Linux 虚拟内存系统](#linux-虚拟内存系统)
+      - [Linux 虚拟内存区域](#linux-虚拟内存区域)
+      - [Linux 缺页异常处理](#linux-缺页异常处理)
+  - [内存映射](#内存映射)
+    - [再看共享对象](#再看共享对象)
+    - [再看 `fork` 函数](#再看-fork-函数)
+    - [再看 `execve` 函数](#再看-execve-函数)
+    - [使用 `mmap` 的用户级内存映射](#使用-mmap-的用户级内存映射)
+  - [动态内存分配](#动态内存分配)
+    - [`malloc` 和 `free` 函数](#malloc-和-free-函数)
+    - [分配器的要求和目标](#分配器的要求和目标)
+    - [碎片化](#碎片化)
+    - [实现问题](#实现问题)
+    - [隐式空闲链表](#隐式空闲链表)
+    - [放置已分配的块](#放置已分配的块)
+    - [分割空闲块](#分割空闲块)
+    - [获取额外的堆内存](#获取额外的堆内存)
+    - [合并空闲块](#合并空闲块)
+    - [带边界标记的合并](#带边界标记的合并)
+    - [综合：实现一个简单的分配器](#综合实现一个简单的分配器)
+      - [通用分配器设计](#通用分配器设计)
+      - [操作空闲链表的基本常数和宏](#操作空闲链表的基本常数和宏)
+      - [创建初始空闲链表](#创建初始空闲链表)
+      - [释放和合并块](#释放和合并块)
+      - [分配块](#分配块)
+    - [显式空闲链表](#显式空闲链表)
+    - [分离的空闲链表](#分离的空闲链表)
+      - [简单分离存储](#简单分离存储)
+      - [分离适配](#分离适配)
+      - [伙伴系统](#伙伴系统)
+  - [垃圾收集](#垃圾收集)
 - [系统级 I/O](#系统级-io)
   - [Unix I/O](#unix-io)
   - [文件](#文件)
@@ -2725,7 +2757,7 @@ CPU 中的一个控制寄存器，**页表基址寄存器**（Page Table Base Re
 $n$ 位的虚拟地址被划分为两个部分：
 
 - $p$ 位的**虚拟页偏移量**（Virtual Page Offset, **VPO**）：用于在虚拟页内定位字
-- $n-p$ 位的**虚拟页号**（Virtual Page Number, **VPN**）：作为索引，在页表中定位 PTE 
+- $n-p$ 位的**虚拟页号**（Virtual Page Number, **VPN**）：作为索引，在页表中定位 PTE
 
 **MMU 通过 VPN 定位目标 PTE 的地址**，然后向高速缓存或主存请求此 PTE。得到 PTE 后，MMU 检查有效位：
 
@@ -2800,6 +2832,766 @@ TLB 是**虚拟寻址**的，VPN 被分成 **TLB 标记位**和 **TLB 索引位*
 
 ## 案例研究：Intel Core i7/Linux 内存系统
 
+Intel Core i7 Haswell **处理器封装**（processor package）包括四个核心、一个所有核心共享的 L3 高速缓存、一个 DDR3 内存控制器。每个核心包含两级高速缓存和两级 TLB，以及一组基于 QuickPath 技术的点到点链路（允许核心与其他核心以及外部 I/O 桥直接通信）。
+
+TLB 虚拟寻址、四路组相联。L1、L2、L3 高速缓存物理寻址，L1 和 L2 $8$ 路组相联，L3 $16$ 路组相联，块大小是 $64$ 字节。页大小可以在启动时配置成 $4 \operatorname{KB}$ 或 $4 \operatorname{MB}$，Linux 一般使用 $4 \operatorname{KB}$。
+
+Haswell 架构允许完全的 $64$ 位虚拟和物理地址空间，但 Core i7 实现只支持 $48$ 位（$256 \operatorname{TB}$）虚拟地址空间和 $52$ 位（$4 \operatorname{PB}$）物理地址空间。Core i7 还有一个兼容模式，支持 $32$ 位（$4 \operatorname{GB}$）虚拟和物理地址空间。
+
+![](images/9-21-i7内存系统.png)
+
+### Core i7 地址翻译
+
+Core i7 Haswell 采用**四级页表**。每个进程有自己私有的页表层次结构。
+
+当一个 Linux 进程运行时，与**已分配页相关的页表**驻留在内存中。
+
+CR3 控制寄存器指向第一级页表 L1 的基址。CR3 的值是每个进程的上下文的一部分。
+
+![](images/9-22-i7地址翻译.png)
+
+前三级页表中的 PTE 格式：
+
+![](images/9-23-PTE格式.png)
+
+|   字段    |                                         描述                                         |
+| :-------: | :----------------------------------------------------------------------------------: |
+|     P     |                             子页表是否已缓存到物理内存中                             |
+|    R/W    |                            对所有可访问页，只读或读写权限                            |
+|    U/S    |                    对所有可访问页，用户或超级用户（内核）模式权限                    |
+|    WT     |                              子页表采用直写还是写回策略                              |
+|    CD     |                                 子页表是否可以被缓存                                 |
+|     A     |                      引用位，由 MMU 在读或写时设置，由软件清除                       |
+|    PS     | 页大小，可以为 $4 \operatorname{KB}$ 或 $4 \operatorname{MB}$（只对第一层 PTE 定义） |
+| Base addr |                             子页表的物理基址的高 $40$ 位                             |
+|    XD     |                            对所有可访问页，是否允许取指令                            |
+
+Linux 中，$P$ 总是为 $1$，此时地址字段包含一个 $40$ 位 PPN，它指向下一级页表的基址。这要求物理页表必须 **$4 \operatorname{KB}$ 对齐**。
+
+第四级页表 PTE 的格式：
+
+![](images/9-24-PTE格式.png)
+
+|   字段    |                            描述                            |
+| :-------: | :--------------------------------------------------------: |
+|     P     |                子页表是否已缓存到物理内存中                |
+|    R/W    |                  对于子页，只读或读写权限                  |
+|    U/S    |          对于子页，用户或超级用户（内核）模式权限          |
+|    WT     |                  子页采用直写还是写回策略                  |
+|    CD     |                     子页是否可以被缓存                     |
+|     A     | 引用位（reference bit）。由 MMU 在读和写时设置，由软件清除 |
+|     D     |   修改位（dirty bit）。由 MMU 在读和写时设置，由软件清除   |
+|     G     |  全局位。如果设置，那么任务切换时，它不会从 TLB 中被驱逐   |
+| Base addr |                 子页的物理基址的高 $40$ 位                 |
+|    XD     |                  对于子页，是否允许取指令                  |
+
+XD 位是 $64$ 位系统引入的，这使得内核降低了缓冲区溢出攻击的风险。
+
+每次访问一个页时，MMU 都会设置 A 位，它是内核页替换算法的一部分
+
+每次写一个页时，MMU 都会设置 D 位，内核根据它决定是否需要将牺牲页写回磁盘
+
+内核可以调用一条内核模式指令来清除引用位和修改位。
+
+Core i7 MMU 将 $36$ 位的 VPN 划分成四个 $9$ 为的片，作为到页表中 PTE 的索引：
+
+![](images/9-25-页表翻译.png)
+
+> 地址翻译包括两个步骤：
+>
+> - MMU 将虚拟地址翻译成物理地址
+> - 将物理地址传送给 L1 高速缓存
+>
+> 这两个步骤可以部分重叠：
+>
+> 页大小为 $4 \operatorname{KB}$ 时，虚拟地址有 $12$ 位的 VPO，并且它和其对应的 PPO 相同。八路组相联、物理寻址的 L1 高速缓存有 $64$ 个组，块大小为 $64$ 字节，因此物理地址的低 $6$ 位是块偏移，中间 $6$ 位是组索引，高 $40$ 位是标记位。
+> 因此，当 CPU 发送 VPN 给 MMU 时，它会同时发送 VPO 给 L1 高速缓存，从而可以让 **L1 高速缓存的组选择**和 **MMU 的页表查找**同时进行。
+
+### Linux 虚拟内存系统
+
+Linux 为每个进程维护一个独立的虚拟地址空间：
+
+![](images/9-26-linux进程的虚拟内存.png)
+
+内核虚拟内存包括**内核中的代码和数据结构**。
+
+内核虚拟内存的某些区域被映射到了**所有进程共享的物理页面**。Linux 也将一组连续的虚拟页（大小等于系统中 DRAM 的总量）映射到一组连续的物理页，为内核提供了一个便利的访问物理内存任何位置的方法（例如访问页表或某些被映射到物理内存的 I/O 设备）。
+
+内核虚拟内存的其他区域包含了**每个进程都不相同的数据**，例如页表、内核在进程上下文中使用的栈，以及记录虚拟地址空间当前组织的数据结构。
+
+#### Linux 虚拟内存区域
+
+Linux 将虚拟内存划分成一些**区域**（area，又叫**段**，segment）。一个区域就是一个已分配的、连续的虚拟内存**片**，代码段、数据段、堆、共享库段、用户栈等都是区域。**所有页都有一个所属的区域**。
+
+区域的概念允许虚拟内存有间隙，使得内核不用记录尚不存在的虚拟页，它们也不会占用任何内存或磁盘资源。
+
+内核为每个进程维护一个 `task_struct`，其中的元素包含内核运行此进程需要的信息，包括 PID、指向用户栈的指针、可执行目标文件名、程序计数器等
+
+`task_struct` 中的 `mm` 元素指向一个 `mm_struct`，它描述虚拟内存的当前状态。其中
+
+- `pgd` 保存第一级页表（页全局目录）的基址。内核运行进程时，会**将 `pgd` 存放在 CR3 控制寄存器中**
+- `mmap` 指向一个 `vm_area_struct` 链表，每个 `vm_area_struct` 描述一个区域
+
+`vm_area_struct` 包括：
+
+- `vm_start`：区域的起始地址
+- `vm_end`：区域的结束地址
+- `vm_port`：区域内所有页的读写权限
+- `vm_flags`：区域内的页是否可和其他进程共享，以及一些其他信息
+- `vm_next`：指向下一个 `vm_area_struct` 的指针
+
+![](images/9-27-linux虚拟内存.png)
+
+#### Linux 缺页异常处理
+
+如果 MMU 在翻译虚拟地址 $A$ 时触发了缺页，那么控制会转移到内核的缺页处理程序。处理程序执行以下步骤：
+
+- 检查 $A$ **是否合法**：处理程序查找 `vm_area_struct` 链表，检查 $A$ 是否包含在某对 `[vm_start, vm_end)` 中。如果 $A$ 不合法，处理程序触发一个**段错误**，终止进程
+
+由于进程可以通过 `mmap` 创建任意数量的新虚拟内存区域，所以 Linux 实现中在链表里构建了一棵树，用树来做查找。
+
+- 检查对 $A$ 的**内存访问是否合法**：即检查进程是否有权限进行此访问（写只读页、用户模式进程读写内核虚拟内存等）。如果不合法，处理程序触发一个**保护异常**，终止进程
+- 此时处理程序知道此次缺页是对合法地址的合法访问，它选择一个牺牲页（如果牺牲页被修改过，将它写回磁盘），换入新页并更新页表。然后处理程序返回到引起缺页的指令，并重新执行它，这一次会页命中
+
+![](images/9-28-缺页.png)
+
+## 内存映射
+
+Linux 通过将一个虚拟内存区域与一个磁盘上的**对象**（object）关联起来，从而初始化这个虚拟内存区域。这个过程称为**内存映射**（memory mapping）。对象可以是：
+
+- Linux 文件系统中的**普通文件**：例如一个可执行目标文件。文件的节（section）被分为页大小的片，每一片包含一个虚拟页的初始内容。由于按需进行页面调度的机制，这些页只有在被 CPU 第一次引用时才被实际读入物理内存。区域如果比文件节更大，那么余下的部分被**零初始化**
+- **匿名文件**：匿名文件由内核创建，包含的全是二进制零。CPU 第一次引用被映射到匿名文件的区域时，内核会在物理内存中牺牲一个页（若修改过，写回它），用二进制零覆写它并更新页表，并令这个页**驻留内存**。被映射到匿名文件区域的页也叫**请求二进制零的页**（demand-zero page）
+
+一旦一个虚拟页被初始化，它就在一个由内核维护的**交换文件**（swap file）之间换来换去。交换文件也叫**交换空间**（swap space）或**交换区域**（swap area）。任何时刻，交换空间都限制着当前进程能够分配的虚拟页的总数。
+
+### 再看共享对象
+
+如果虚拟内存系统可以集成到传统的文件系统中，那么就可以简单而高效地将程序和数据加载到内存里。
+
+一个被映射到虚拟内存区域的对象要么是**共享对象**，要么是**私有对象**。
+
+一个进程对它虚拟地址空间内某个**共享对象**的更改**会反映到磁盘上的原始对象**上，且**对其他共享了此对象的进程也可见**。而对于**私有对象**，进程对它的更改**不会反映到磁盘上的原始对象**上，且**对其他进程也不可见**。
+
+映射到共享对象的虚拟内存区域称为**共享区域**，类似地，也有**私有区域**。
+
+![](images/9-29-共享对象.png)
+
+如上图，即使共享对象被映射到了多个共享区域，物理内存中也只需要存放它的**一个副本**（注意**物理页不一定连续**）
+
+私有对象采用**写时复制**（copy on write）技术。私有对象开始生命周期的方式和共享对象基本一样，但**私有区域的 PTE 被标记为只读**，并且区域结构体 `vm_area_struct` 被标记为**私有的写时复制**。
+
+如果有进程试图写自己私有区域的某个页，那么这个写就会**触发一个保护故障**。故障处理程序会在物理内存中创建此程序的一个新副本，更新页表条目，然后恢复这个副本的可写权限。处理程序返回时，故障指令重新执行，这一次会成功写入。
+
+写时复制充分节约了物理内存资源。
+
+### 再看 `fork` 函数
+
+当前进程调用 `fork` 时，内核为新进程创建各种数据结构，并分配给它一个唯一的 PID。
+
+为了为新进程创建虚拟内存，它创建了当前进程的 `mm_struct`、`vm_area_struct` 和页表的副本。它**将两个进程的每个页面都标记为只读**，并**将两个进程的每个 `vm_area_struct` 标记为写时复制**。
+
+`fork` 返回时，两个进程就拥有了独立且私有的虚拟地址空间。
+
+### 再看 `execve` 函数
+
+假设当前进程调用了
+
+```c
+execve("a.out", NULL, NULL);
+```
+
+则：
+
+- 内核**删除已存在的用户区域**：删除当前虚拟地址空间用户部分中已存在的 `vm_area_struct`
+- **映射私有区域**：为新程序的代码（code）区域、数据区域、bss 区域和栈区域创建新的 `vm_area_struct`，它们是**私有、写时复制的**。
+  - 代码区域和数据区域被映射为 `a.out` 的 `.text` 段和 `.data` 段。
+  - bss 区域是请求二进制零的，映射到匿名文件（匿名文件的大小也被包含在 `a.out` 中）
+  - 栈区域和堆区域也请求二进制零，初始长度为零。
+- **映射共享区域**：如果 `a.out` 与共享对象（目标）链接，例如 `libc.so`，那么这些对象会动态链接到程序，然后再映射到用户虚拟地址空间中的共享区域内。
+- **设置程序计数器（PC）**：将 PC 设置为代码区域的入口点
+
+![](images/9-31-加载器内存映射.png)
+
+### 使用 `mmap` 的用户级内存映射
+
+```c
+#include <unistd.h>
+#include <sys/mman.h>
+
+// 创建新的虚拟内存区域，并将 fd 所指定对象 offset 偏移处起 length 字节长度的连续的片映射到此区域
+// 返回：若成功，返回指向映射区域的指针；若出错，返回 MAP_FAILED（-1）
+void* mmap(void* start, size_t length, int prot, int flags, int fd, off_t offset);
+```
+
+![](images/9-32-mmap用法.png)
+
+`start` 参数向内核建议新虚拟内存区域的起始地址，内核可以忽略这个建议。
+
+`prot` 描述新区域的访问权限位，即相应 `vm_area_struct` 的 `vm_prot` 字段：
+
+- $\text{PROT\_EXEC}$：区域内的页可执行
+- $\text{PROT\_READ}$：区域内的页可读
+- $\text{PROT\_WRITE}$：区域内的页可写
+- $\text{PROT\_NONE}$：区域内的页不可访问
+
+`flags` 描述被映射对象的类型：
+
+- $\text{MAP\_ANON}$：匿名对象（相应的虚拟页请求二进制零）
+- $\text{MAP\_PRIVATE}$：私有对象，写时复制
+- $\text{MAP\_SHARED}$：共享对象
+
+```c
+#include <unistd.h>
+#include <sys/mman.h>
+
+// 删除 start 起 length 字节长度的区域
+int munmap(void* start, size_t length);
+```
+
+访问被 `munmap` 删除的区域会导致段错误。
+
+## 动态内存分配
+
+动态内存分配器维护进程的**堆**（heap）。我们假设堆是一个**请求二进制零**的区域，紧接着 bss 区域之后，向上（地址增加）生长。
+
+动态内存分配器将堆视为一组不同大小**块**（block）的集合。每个块都是一个**连续的虚拟内存片**（chunk）。
+
+一个块要么是**已分配的**，要么是**空闲的**。已分配的块供应用程序使用，它保持已分配状态，直到被**释放**。空闲块保持空闲，直到被应用程序显式地**分配**。
+
+分配器有两种风格：
+
+- **显式分配器**（explicit allocator）：要求应用显式地释放已分配的块。例如 C 的 `malloc` 和 `free` 函数、C++ 的 `new` 和 `delete` 运算符
+- **隐式分配器**（implicit allocator）：又叫**垃圾收集器**（garbage collector），由分配器检测已分配块何时不再被使用，自动释放它们。
+
+### `malloc` 和 `free` 函数
+
+```c
+#include <stdlib.h>
+
+// 返回：若成功，返回指向大小至少为 size 字节的已分配块的指针；若出错，返回 NULL
+void* malloc(size_t size);
+```
+
+返回指针，指向大小至少为 `size` 字节的块。这个块为可能包含在其中的任何数据对象对齐：
+
+- 在 32 位模式中，块的地址是 8 的倍数
+- 在 64 位模式中，块的地址是 16 的倍数。
+
+> Intel 将 4 字节对象称为双字，在这里，我们假设字是 4 字节的
+
+如果 `malloc` 出错（例如要求的内存块大于可用的虚拟内存），它就会返回 `NULL`，并设置 `errno`。
+
+`malloc` 不会执行初始化，`calloc` 是一个基于 `malloc` 的瘦包装函数，会将分配的内存**零初始化**。
+
+可以用 `realloc` 改变已分配块的大小：
+
+动态内存分配器可以使用 `mmap` 和 `munmap` 显式地分配和释放堆内存。还可以使用 `sbrk` 函数
+
+```c
+#include <unistd.h>
+
+// incr 可以为正数、负数或零
+// 返回：若成功，返回 brk 的旧值；若出错，返回 -1
+void* sbrk(intptr_t incr);
+```
+
+`sbrk` 通过改变 `brk` 指针来扩展和收缩堆。如果成功，它返回 `brk` 指针的旧值，否则返回 `−1`，并设置 `errno` 为 $\text{ENOMEM}$。
+
+`free` 释放已分配的内存块。
+
+```c
+#include <stdlib.h>
+
+void free(void* ptr);
+```
+
+`ptr` 必须指向一个从 `malloc`、`calloc` 或 `realloc` 获得的已分配块的基址，否则行为未定义。
+
+![](images/9-34-动态内存分配.png)
+
+我们假设分配器返回的块是 8 字节双字边界对齐的。注意在 9-34b 中，`malloc` 会分配一个 6 字的块。
+
+### 分配器的要求和目标
+
+- **处理任意请求序列**：分配器必须能够处理任意的 `malloc` 和 `free` 请求序列，只要它们是合法的
+- **立即响应请求**：即不允许分配器为了性能重新排列或缓冲请求
+- **只使用堆**：为了可扩展性。任何非标量数据结构都必须被保存在堆上
+- **对齐块**：块必须对齐，以便它们可以保存任何类型的对象
+- **不修改已分配的块**：只能操作或改变空闲的块，压缩已分配块等操作是不允许的
+
+在以上限制下，分配器需要实现**吞吐率最大化**和**内存使用率最大化**。
+
+- **吞吐率**：单位时间内完成的请求（分配或释放）数量
+
+合理性能：分配请求的最糟糕情况时间复杂度是 $O(n)$（和空闲块的数量成线性关系），释放请求的时间复杂度是 $O(1)$。
+
+- **内存使用率**：可以用**峰值利用率**（peek utilization）衡量。
+
+例如，给定 $n$ 个分配或释放请求的序列
+
+$$R_0, R_1, \cdots, R_{n-1}$$
+
+一个分配 $p$ 字节块的请求对应的**有效载荷**（payload）是 $p$ 字节。
+
+请求 $R_k$ 完成后的**聚集有效载荷**（aggregate payload）$P_k$ 定义为当前已分配块的有效载荷之和。
+
+记 $H_k$ 为堆的当前大小，它是单调非减的。那么前 $k+1$ 个请求的峰值利用率为
+
+$$U_k=\frac{\max_{i\leq k} P_i}{H_k}.$$
+
+分配器的目标是在整个序列中使峰值利用率最大化。
+
+> 也可以取 $H_k$ 为前 $k+1$ 个请求过程中最大的堆大小，从而放宽堆大小单调非减的假设
+
+### 碎片化
+
+碎片化（fragmentation）会造成堆利用率降低。碎片化分为**内部碎片化**（internal fragmentation）和**外部碎片化**（external fragmentation）。
+
+内部碎片化：已分配块比它的有效载荷大。例如，分配器可能对已分配块强加一个最小的大小，或者为了对齐块而增加了块大小。
+
+内部碎片化只取决于请求的模式和分配器的实现。
+
+外部碎片化：空闲内存合计起来足够满足一个分配请求，但每个单独的空闲块都不够大。
+
+外部碎片化难以量化且无法预测，分配器采用启发式策略，试图维护少量的大空闲块，而不是大量的小空闲块。
+
+### 实现问题
+
+最简单的分配器：
+
+```c
+void* malloc(size_t size) {
+    return sbrk(size);
+}
+
+void free(void* ptr) {
+    return;
+}
+```
+
+由于 `malloc` 和 `free` 极其简单，吞吐率会极好。但分配器从不重复利用任何块，内存利用率会极差。
+
+实际的分配器必须考虑以下问题：
+
+- **空闲块的组织**
+- **放置**：选择哪个空闲块来满足当前的分配请求
+- **分割**：将新分配的块放置到空闲块后，如何处理空闲块剩余的部分
+- **合并**：如何处理刚刚被释放的块
+
+### 隐式空闲链表
+
+大多数分配器将块的元数据嵌入块本身：
+
+![](images/9-35-简单堆块的格式.png)
+
+一个块由一个单字大小的**头部**、有效载荷，以及一些可能的额外**填充**组成。
+
+头部编码了块（包含头部和填充）的**总大小**以及块的**状态**（已分配或空闲）
+
+如果我们要求块**双字对齐**，那么块大小就总是 8 的倍数，其二进制表示的最低 3 位总是 0。因此，我们只需要 29 个高位来编码块大小。剩余的 3 位用于编码块的状态。
+
+![](images/9-36-隐式空闲链表.png)
+
+堆被组织成连续的已分配块和空闲块的序列。这种结构称为**隐式空闲链表**（implicit free list），因为空闲块通过头部的大小字段隐式地连接在一起。
+
+我们需要一个特殊标记的结束块，此例中即一个设置了分配位而大小为零的终止头部（terminating header）
+
+隐式空闲链表很简单，但任何操作的开销，例如放置分配的块，都需要搜索空闲链表，其**时间复杂度和块的总数成线性关系**。而且，对齐要求导致**块大小至少是双字**，这会导致**内部碎片化**。
+
+### 放置已分配的块
+
+处理一个 $k$ 字节块的分配请求时，分配器搜索空闲链表，查找合适的空闲块放置新分配的块。搜索的方式取决于分配器的**放置策略**。
+
+**首次适配**（first fit）从头开始搜索空闲链表，选择首个合适的空闲块。
+
+首次分配趋向于将大的空闲块保留在链表尾部，但容易在链表前部留下小空闲块的碎片，从而增加了对较大快的搜索时间。
+
+**下一次适配**（next fit）从**上次搜索结束的地方**开始搜索，选择首个合适的空闲块。
+
+下一次适配由 Donald Knuth 提出，作为首次适配的改进。它基于一个简单的想法：上一次发现的空闲块很可能也能被下一次使用。下一次适配的性能明显地更快，但是内存利用率要低得多。
+
+**最佳适配**（best fit）搜索**整个**空闲链表，选择**最小**的满足要求的空闲块。
+
+最佳适配的内存利用率好，但性能很差，因为它必须搜索整个空闲链表。
+
+### 分割空闲块
+
+分配器找到匹配的空闲块后，需要决定应分配空闲块中多少空间。
+
+如果用整个空闲块，那么会造成**内部碎片化**。如果放置策略能产生好的匹配，额外的内部碎片是可以接受的。
+
+如果匹配不太好，分配器通常会将空闲块分割成两部分，一部分作为分配块，另一部分变成新的空闲块。
+
+### 获取额外的堆内存
+
+如果分配器不能为请求找到合适的空闲块，那么它可以通过合并物理上相邻的空闲块来创建一些更大的空闲块。如果这样还不行，分配器就用 `sbrk` 向内核请求额外的堆内存，将其转化为一个新的空闲块，插入空闲链表。
+
+### 合并空闲块
+
+当分配器释放已分配块时，可能有其他空闲块与之相邻。这种相邻的空闲块可能引起**假碎片化**（fault fragmentation）。
+
+分配器需要合并（coalescing）相邻的空闲块。
+
+**立即合并**（immediate coalescing）：每次释放块时执行合并
+
+**推迟合并**（deferred coalescing）：无法满足某个分配请求时，扫描整个堆，合并所有相邻的空闲块
+
+立即合并可能产生一种抖动：块反复的合并和分割。
+
+快速的分配器通常会选择某种形式的推迟合并。
+
+### 带边界标记的合并
+
+由于我们的目前隐式链表是单向的，所以合并前驱空闲块时会有困难。
+
+Knuth 提出了**边界标记**（boundary tag）的方法：在每个块的尾部添加一个**脚部**（footer）作为头部的一个副本。
+
+![](images/9-39-带边界标记的块.png)
+
+释放当前块时，根据前驱块和后继块的状态可以有四种情况：
+
+1. 前驱块已分配，后继块已分配
+2. 前驱块已分配，后继块空闲
+3. 前驱块空闲，后继块已分配
+4. 前驱块空闲，后继块空闲
+
+![](images/9-40-合并.png)
+
+每种情况下，合并的时间复杂度都是常数级的。
+
+边界标记简单而优雅，但对于频繁请求小块的应用，为每个块同时维护两个字大小的头部和脚部有些浪费。
+
+注意到，**只有当前驱块空闲时**，我们才会用到它的脚部。如果**将前驱块的已分配 / 空闲位存放在当前块中多余的空位**，那么已分配的块就不需要脚部了（不过空闲块仍然需要脚部）。
+
+### 综合：实现一个简单的分配器
+
+最大的块大小是 $2^32=4 \text{GB}$，代码是 64 位 clean 的，即可以不加修改地运行在 32 位（`gcc -m32`）和 64 位（`gcc -m64`）的进程上。
+
+#### 通用分配器设计
+
+`memlib.c` 包提供了一个内存系统模型：
+
+```c
+/* memlib.c */
+
+/* Private global variables */
+static char* mem_heap;    /* Points to first byte of heap */
+static char* mem_brk;    /* Points to last byte of heap plus 1 */
+static char* mem_max_addr;  /* Max legal heap addr plus 1 */
+
+/*
+ * mem_init - Initialize the memory system model
+ */
+void mem_init(void) {
+    mem_heap = (char*)Malloc(MAX_HEAP);
+    mem_brk = (char*)mem_heap;
+    mem_max_addr = (char*)(mem_heap + MAX_HEAP);
+}
+
+/*
+ * mem_sbrk - Simple model of the sbrk function. Extends the heap
+ *    by incr bytes and returns the start address of the new area. In
+ *    this model, the heap cannot be shrunk.
+ */
+void* mem_sbrk(intptr_t incr) {
+    char* old_brk = mem_brk;
+
+    if ((incr < 0) || ((mem_brk + incr) > mem_max_addr)) {
+        errno = ENOMEM;
+        fprintf(stderr, "ERROR: mem_sbrk failed. Ran out of memory...\n");
+        return (void*)-1;
+    }
+    mem_brk += incr;
+    return (void*)old_brk;
+}
+```
+
+分配器包含在 `mm.c` 中，它提供三个接口：
+
+```c
+extern int mm_init(void);
+extern void* mm_malloc(size_t size);
+extern void mm_free(void* ptr);
+```
+
+`mm_init` 函数初始化分配器，若成功返回 0，否则返回 -1。`mm_malloc` 和 `mm_free` 的语义和 `malloc` 和 `free` 相同。
+
+最小的块大小是 16 字节，空闲链表组织为一个隐式空闲链表。
+
+![](images/9-42-隐式空闲链表格式.png)
+
+第一个字是一个双字边界对齐的填充字。后面是一个**序言块**（prologue block），它是一个已分配块，大小为 8 字节，只包含一个头部和一个脚部。它在初始化时被创建，永不释放。
+
+序言块后是由 `malloc` 或者 `free` 调用创建的普通块。
+
+堆总是以一个**结尾块**（epilogue block）阶数，它是一个已分配块，大小为零，只包含一个头部。
+
+序言块和结尾块是一种消除合并边界条件的技巧。分配器使用一个 `static` 的全局变量 `heap_listp`，指向序言块。（也可以让它指向下一个块）
+
+#### 操作空闲链表的基本常数和宏
+
+```c
+/* Basic constants and macros */
+#define WSIZE    4    /* Word and header/footer size (bytes) */
+#define DSIZE    8    /* Double word size (bytes) */
+#define CHUNKSIZE (1<<12)  /* Extend heap by this amount (bytes) */
+
+#define MAX(x, y) ((x) > (y)? (x) : (y))
+
+/* Pack a size and allocated bit into a word */
+#define PACK(size, alloc) ((size) | (alloc))
+
+/* Read and write a word at address p */
+#define GET(p)    (*(unsigned int*)(p))
+#define PUT(p, val) (*(unsigned int*)(p) = (val))
+
+/* Read the size and allocated fields from address p */
+#define GET_SIZE(p)  (GET(p) & ~0x7)
+#define GET_ALLOC(p) (GET(p) & 0x1)
+
+/* Given block ptr bp, compute address of its header and footer */
+#define HDRP(bp) ((char*)(bp) - WSIZE)
+#define FTRP(bp) ((char*)(bp) + GET_SIZE(HDRP(bp)) - DSIZE)
+
+/* Given block ptr bp, compute address of next and previous blocks */
+#define NEXT_BLKP(bp) ((char*)(bp) + GET_SIZE(((char*)(bp) - WSIZE)))
+#define PREV_BLKP(bp) ((char*)(bp) - GET_SIZE(((char*)(bp) - DSIZE)))
+```
+
+注意块指针指向块有效载荷的基址，而不是块的基址。
+
+#### 创建初始空闲链表
+
+```c
+static void* extend_heap(size_t words);
+
+int mm_init(void) {
+    /* Create the initial empty heap */
+    if ((heap_listp = mem_sbrk(4 * WSIZE)) == (void*)-1)
+        return -1;
+    PUT(heap_listp, 0);    /* Alignment padding */
+    PUT(heap_listp + (1 * WSIZE), PACK(DSIZE, 1));    /* Prologue header */
+    PUT(heap_listp + (2 * WSIZE), PACK(DSIZE, 1));    /* Prologue footer */
+    PUT(heap_listp + (3 * WSIZE), PACK(0, 1));    /* Epilogue header */
+    heap_listp += (2 * WSIZE);
+
+    /* Extend the empty heap with a free block of CHUNKSIZE bytes */
+    if (extend_heap(CHUNKSIZE / WSIZE) == NULL)
+        return -1;
+    return 0;
+}
+
+static void* extend_heap(size_t words) {
+    char* bp;
+    size_t size;
+
+    /* Allocate an even number of words to maintain alignment */
+    size = (words % 2) ? (words + 1) * WSIZE : words * WSIZE;
+    if ((long)(bp = mem_sbrk(size)) == -1)
+        return NULL;
+
+    /* Initialize free block header/footer and the epilogue header */
+    PUT(HDRP(bp), PACK(size, 0));    /* Free block header */
+    PUT(FTRP(bp), PACK(size, 0));    /* Free block footer */
+    PUT(HDRP(NEXT_BLKP(bp)), PACK(0, 1));    /* New epilogue header */
+
+    /* Coalesce if the previous block was free */
+    return coalesce(bp);
+}
+```
+
+`extend_heap` 会在两种情况下调用：
+
+- 堆初始化
+- `mm_malloc` 无法找到合适的匹配块
+
+#### 释放和合并块
+
+```c
+void mm_free(void* bp) {
+    size_t size = GET_SIZE(HDRP(bp));
+
+    PUT(HDRP(bp), PACK(size, 0));
+    PUT(FTRP(bp), PACK(size, 0));
+    coalesce(bp);
+}
+
+static void* coalesce(void* bp) {
+    size_t prev_alloc = GET_ALLOC(FTRP(PREV_BLKP(bp)));
+    size_t next_alloc = GET_ALLOC(HDRP(NEXT_BLKP(bp)));
+    size_t size = GET_SIZE(HDRP(bp));
+
+    if (prev_alloc && next_alloc) {    /* Case 1 */
+        return bp;
+    } else if (prev_alloc && !next_alloc) {    /* Case 2 */
+        size += GET_SIZE(HDRP(NEXT_BLKP(bp)));
+        PUT(HDRP(bp), PACK(size, 0));
+        PUT(FTRP(bp), PACK(size, 0));
+    } else if (!prev_alloc && next_alloc) {    /* Case 3 */
+        size += GET_SIZE(HDRP(PREV_BLKP(bp)));
+        PUT(FTRP(bp), PACK(size, 0));
+        PUT(HDRP(PREV_BLKP(bp)), PACK(size, 0));
+        bp = PREV_BLKP(bp);
+    } else {    /* Case 4 */
+        size += GET_SIZE(HDRP(PREV_BLKP(bp))) + GET_SIZE(FTRP(NEXT_BLKP(bp)));
+        PUT(HDRP(PREV_BLKP(bp)), PACK(size, 0));
+        PUT(FTRP(NEXT_BLKP(bp)), PACK(size, 0));
+        bp = PREV_BLKP(bp);
+    }
+    return bp;
+}
+```
+
+#### 分配块
+
+最小块大小是 16 字节：8 字节用于对齐，8 字节用于头部和脚部。
+
+```c
+void* mm_malloc(size_t size) {
+    size_t asize;    /* Adjusted block size */
+    size_t extendsize;    /* Amount to extend heap if no fit */
+    char* bp;
+
+    /* Ignore spurious requests */
+    if (size == 0)
+        return NULL;
+
+    /* Adjust block size to include overhead and alignment reqs. */
+    if (size <= DSIZE)
+        asize = 2 * DSIZE;
+    else
+        asize = DSIZE * ((size + (DSIZE) + (DSIZE - 1)) / DSIZE);
+
+    /* Search the free list for a fit */
+    if ((bp = find_fit(asize)) != NULL) {
+        place(bp, asize);
+        return bp;
+    }
+
+    /* No fit found. Get more memory and place the block */
+    extendsize = MAX(asize, CHUNKSIZE);
+    if ((bp = extend_heap(extendsize / WSIZE)) == NULL)
+        return NULL;
+    place(bp, asize);
+    return bp;
+}
+
+static void* find_fit(size_t asize) {
+    /* First-fit search */
+    void* bp;
+
+    for (bp = heap_listp; GET_SIZE(HDRP(bp)) > 0; bp = NEXT_BLKP(bp)) {
+        if (!GET_ALLOC(HDRP(bp)) && (asize <= GET_SIZE(HDRP(bp))))
+            return bp;
+    }
+    return NULL;    /* No fit */
+}
+
+static void place(void* bp, size_t asize) {
+    size_t csize = GET_SIZE(HDRP(bp));
+
+    if ((csize - asize) >= (2 * DSIZE)) {
+        PUT(HDRP(bp), PACK(asize, 1));
+        PUT(FTRP(bp), PACK(asize, 1));
+        bp = NEXT_BLKP(bp);
+        PUT(HDRP(bp), PACK(csize - asize, 0));
+        PUT(FTRP(bp), PACK(csize - asize, 0));
+    } else {
+        PUT(HDRP(bp), PACK(csize, 1));
+        PUT(FTRP(bp), PACK(csize, 1));
+    }
+}
+```
+
+### 显式空闲链表
+
+![](images/9-48-双向链表堆块.png)
+
+在每个空闲块中包含一个 `pred` 指针和一个 `succ` 指针，指向前驱空闲块和后继空闲块。
+
+这使得 first fit 的分配时间从块总数的线性时间降低到空闲块的线性时间。
+
+取决于空闲链表中块的排序策略，释放块的时间可能是线性的，也可能是常数的。
+
+**后进先出**（LIFO）：新释放的块放置在链表的开始处。搜索时，分配器先检查最近使用过的块，释放块可以在常数时间内完成。如果使用了边界标记，那么合并也可以在常数时间内完成。
+
+**地址顺序**（address-ordered）：空闲块按地址顺序排列。释放块需要线性时间，但内存利用率更高，接近 best fit。
+
+显式链表要求了更大的最小块大小，提高了内部碎片化的程度。
+
+### 分离的空闲链表
+
+**分离存储**（segregated storage）：维护多个空闲链表，每个链表中的块有大致相等的大小。
+
+一般将所有可能的块大小分成一些等价类，称为**大小类**（size class）。以下是一个例子，其中小的块单独成类，大的块按 $2$ 的幂分类：
+
+$$\{1\}, \{2\}, \{3\}, \cdots, \{1023\}, \{1024\}, \{1025\sim2048\}, {2049\sim4096\}, {4097\sim\infty\}$$
+
+每个大小类都有一个对应的空闲链表。
+
+#### 简单分离存储
+
+每个大小类的空闲链表的块大小相等，都等于大小类中最大元素的大小。若大小类为 $\{17\sim32\}$，则相应链表的块大小都是 32 字节。
+
+对于分配请求，我们检查相应的空闲链表：
+
+- 若链表非空：分配其第一个块的**全部**
+- 若链表为空：向内核请求一个固定大小的额外的片，将其分成大小相等的块，组成新的空闲链表
+
+对于释放请求，分配器简单地将这个块插入到相应空闲链表的头部。
+
+简单分离存储**不分割、不合并**。
+
+优点：
+
+- 分配和释放的时间很短
+- **块不需要头部**：因为每个片都只有大小相同的块，所以已分配块的大小可以直接从地址推断。因为不用合并，所以块也不需要已分配 / 空闲的标记。
+- **块也不需要尾部**，因为不用合并
+- 块只需要携带一个 `succ` 指针，因此最小块大小就是一个字
+
+缺点：不分割会造成**内部碎片化**，不合并又会造成**外部碎片化**
+
+#### 分离适配
+
+分配器维护一个空闲链表的数组。每个空闲链表和一个大小类关联，包含潜在的大小不同的块，其大小是大小类的成员。
+
+对于分配请求，我们对适当的大小类对应的空闲链表 first fit 搜索：
+
+- 若找到，就（可选地）分割它，将剩余部分插入到适当的空闲链表中
+- 若找不到，搜索下一个大小类对应的空闲链表
+- 若查找完所有的空闲链表仍找不到，向内核请求额外的片，从其中分配出一个块，将剩余部分放置在适当大小类对应的空闲链表中
+
+对于释放请求，我们执行合并，并将结果放置在适当的空闲链表中
+
+GNU `malloc` 采用的就是分离适配方法。对分离空闲链表的简单的 first fit 搜索的内存利用率近似于对整个堆的 best fit 搜索。
+
+#### 伙伴系统
+
+伙伴系统（buddy system）是分离适配的特例，其中每个大小类都是 $2$ 的幂。
+
+假设一个堆的大小是 $2^m$ 个字，我们为每个块大小 $2^k$ 维护一个分离空闲链表，其中 $0\leq k\leq m$。
+
+初始时只有一个大小为 $2^m$ 个字的空闲块。
+
+对于一个分配 $2^k$ 大小的块的请求，我们找到第一个可用的块，其大小为 $2^j$：
+
+- 若 $j=k$，那么分配完成
+- 否则 $j>k$，我们递归地二分它，直到 $j=k$，每次二分后剩下的半块（称为**伙伴**）放置在相应的空闲链表中
+
+对于一个释放 $2^k$ 大小的块的请求，我们继续合并空闲的伙伴，直到遇到一个已分配的伙伴。
+
+对于伙伴系统，如果给定地址和块大小，那么其伙伴的地址很容易计算。例如，若一个大小为 $32$ 字节的块的地址为
+
+$$xxx\cdots x00000,$$
+
+那么它的伙伴的地址就是
+
+$$xxx\cdots x10000.$$
+
+伙伴系统可以快速搜索并快速合并。然而它要求块大小全都是 $2$ 的幂，可能导致显著的内部碎片化。它不适合通用目的的工作负载，但对某些特定的应用场景效率很高。
+
+## 垃圾收集
+
 
 
 
@@ -2827,7 +3619,7 @@ Linux shell 创建的每个进程，在开始时都有三个已打开的文件�
 // 以下常量可以代替显式的描述符值
 STDIN_FILENO    // standard input
 STDOUT_FILENO    // standard output
-STDERR_FILENO    // standard error
+ STDERR_FILENO    // standard error
 ```
 
 **改变当前的文件位置**：对于每个已打开文件，内核维护一个**文件位置** $k$，初始值为 0，表示**从文件开头起的字节偏移量**。应用程序可以通过 `seek` 操作显式地设置文件的当前位置
@@ -2916,7 +3708,7 @@ fd = open(filename, O_CREAT | O_TRUNC | O_WRONLY, DEF_MODE);    // permissions w
 
 // 关闭文件
 // 返回：若成功，返回 0；若出错，返回 -1
-int close(int fd);    
+int close(int fd);
 ```
 
 ## 读和写文件
@@ -3040,7 +3832,7 @@ static ssize_t rio_read(rio_t* rp, char* usrbuf, size_t n) {
         rp->rio_cnt = read(rp->rio_fd, rp->rio_buf, sizeof(rp->rio_buf));
 
         if (rp->rio_cnt < 0) {sig handler return
-            if (errno != EINTR)  // interrupted by 
+            if (errno != EINTR)  // interrupted by
                 return -1;
         }
         else if (rp->rio_cnt == 0)  // EOF
@@ -3063,14 +3855,14 @@ static ssize_t rio_read(rio_t* rp, char* usrbuf, size_t n) {
 ssize_t rio_readlineb(rio_t* rp, void* usrbuf, size_t maxlen) {
     int n;     // num of lines read
     int rc;    // char read by rio_read
-    char c; 
+    char c;
     char* bufp = usrbuf;
 
     for (n = 1; n < maxlen; n++) {
         if ((rc = rio_read(rp, &c, 1)) == 1) {    // read 1 byte
             *bufp++ = c;
             if (c == '\n') {
-                n++;    
+                n++;
                 break;
             }
         } else if (rc == 0) {
