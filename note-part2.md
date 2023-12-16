@@ -126,6 +126,20 @@
       - [分离适配](#分离适配)
       - [伙伴系统](#伙伴系统)
   - [垃圾收集](#垃圾收集)
+    - [垃圾收集器的基本知识](#垃圾收集器的基本知识)
+    - [Mark\&Sweep 垃圾收集器](#marksweep-垃圾收集器)
+    - [C 程序的保守 Mark\&Sweep](#c-程序的保守-marksweep)
+  - [C 程序中常见的与内存有关的错误](#c-程序中常见的与内存有关的错误)
+    - [解引用坏指针](#解引用坏指针)
+    - [读未初始化的内存](#读未初始化的内存)
+    - [允许栈缓冲区溢出](#允许栈缓冲区溢出)
+    - [在类型大小上犯错](#在类型大小上犯错)
+    - [造成错位错误](#造成错位错误)
+    - [错误地解引用指针](#错误地解引用指针)
+    - [错误地增减指针](#错误地增减指针)
+    - [悬垂指针](#悬垂指针)
+    - [引用已经被释放的内存](#引用已经被释放的内存)
+    - [内存泄漏](#内存泄漏)
 - [系统级 I/O](#系统级-io)
   - [Unix I/O](#unix-io)
   - [文件](#文件)
@@ -140,6 +154,42 @@
   - [I/O 重定向](#io-重定向)
   - [标准 I/O](#标准-io)
   - [我该使用哪些 I/O 函数？](#我该使用哪些-io-函数)
+- [网络编程](#网络编程)
+  - [客户端-服务器编程模型](#客户端-服务器编程模型)
+  - [网络](#网络)
+  - [全球 IP 因特网](#全球-ip-因特网)
+    - [IP 地址](#ip-地址)
+    - [Internet 域名](#internet-域名)
+    - [Internet 连接](#internet-连接)
+  - [套接字接口](#套接字接口)
+    - [套接字地址结构体](#套接字地址结构体)
+    - [`socket` 函数](#socket-函数)
+    - [`bind` 函数](#bind-函数)
+    - [`connect` 函数](#connect-函数)
+    - [`listen` 函数](#listen-函数)
+    - [`accept` 函数](#accept-函数)
+    - [`close` 函数](#close-函数)
+    - [主机和服务的转换](#主机和服务的转换)
+      - [`getaddrinfo` 函数](#getaddrinfo-函数)
+      - [`getnameinfo` 函数](#getnameinfo-函数)
+    - [套接字接口的辅助函数](#套接字接口的辅助函数)
+      - [`open_clientfd` 函数](#open_clientfd-函数)
+      - [`open_listenfd` 函数](#open_listenfd-函数)
+    - [echo 客户端和服务器的示例](#echo-客户端和服务器的示例)
+  - [Web 服务器](#web-服务器)
+    - [Web 基础](#web-基础)
+    - [Web 内容](#web-内容)
+    - [HTTP 事务](#http-事务)
+      - [HTTP 请求](#http-请求)
+      - [HTTP 响应](#http-响应)
+    - [服务动态内容](#服务动态内容)
+      - [客户端将程序参数传递给服务器](#客户端将程序参数传递给服务器)
+      - [服务器将参数传递给子进程](#服务器将参数传递给子进程)
+      - [服务器如何将其他信息传递给子进程](#服务器如何将其他信息传递给子进程)
+      - [子进程将其输出发送到哪里](#子进程将其输出发送到哪里)
+  - [综合：TINY Web 服务器](#综合tiny-web-服务器)
+- [并发编程](#并发编程)
+  - [基于进程的并发编程](#基于进程的并发编程)
 
 # 链接
 
@@ -674,7 +724,7 @@ ELF 被设计地很容易加载到内存。可执行文件的连续的**片**（
 
 对于任何段 `s`，链接器所选择的起始地址 `vaddr` 必须满足
 
-$$\operatorname{vaddr}\equiv\operatorname{off}\pmod{\operatorname{align}},$$
+$$\text{vaddr}\equiv\text{off}\pmod{\text{align}},$$
 
 其中 `off` 是**段的首字节在目标文件中的偏移量**，`align` 是程序头部中指定的对齐（此处为 $2^{21}=0x200000$）。这种对齐加快了段传送到内存的效率。
 
@@ -2602,7 +2652,7 @@ int main() {
 
 ## 物理和虚拟寻址
 
-主存被组织成一个由 $M$ 个连续的字节大小的单元的数组，每个字节都拥有一个唯一的物理地址（Physical Address, PA）。
+主存被组织成一个由 $M$ 个连续的字节大小的单元的数组，每个字节都拥有一个唯一的**物理地址**（Physical Address, **PA**）。
 
 CPU 直接使用物理地址寻址的方式就是**物理寻址**（physical addressing）。在物理寻址模型中，CPU 加载数据时生成一个有效的物理地址，将它通过**内存总线**传递给主存，主存取出对应数据，并将其返回给 CPU 寄存器。
 
@@ -2610,13 +2660,13 @@ CPU 直接使用物理地址寻址的方式就是**物理寻址**（physical add
 
 现代处理器使用**虚拟寻址**（virtual addressing）。在虚拟寻址模型中，CPU 生成一个**虚拟地址**（Virtual Address, VA），将它经过**地址翻译**（address translation）转换成一个有效的物理地址，然后将其通过内存总线传递给主存。
 
-地址翻译需要硬件和操作系统紧密配合，CPU 芯片上的**内存管理单元**（Memory Management Unit, **MMU**）负责执行地址翻译，它利用存放在主存中的查询表动态翻译虚拟地址，该表的内容由操作系统管理。
+地址翻译需要硬件和操作系统紧密配合，CPU 芯片上的**内存管理单元**（Memory Management Unit, **MMU**）负责执行地址翻译，它利用存放在主存中的页表动态翻译虚拟地址，页表的内容由操作系统管理。
 
 ## 地址空间
 
 **地址空间**（address space）是一个**非负整数**地址的有序集合。
 
-如果地址空间的整数是连续的，那么它是一个**线性地址空间**（linear address space）。我们总假设地址空间是线性的。
+如果地址空间中的整数是连续的，那么它是一个**线性地址空间**（linear address space）。我们总假设地址空间是线性的。
 
 在带虚拟内存的系统中，CPU 从一个有 $N=2^n$ 个地址的地址空间中生成虚拟地址，其中的地址从 $0$ 到 $M-1$ 编号。这个地址空间被称为**虚拟地址空间**（Virtual Address Space, **VAS**）。
 
@@ -2626,11 +2676,13 @@ $n$ 称为**虚拟地址空间的位数**（virtual address space size），它�
 
 ## 虚拟内存作为缓存的工具
 
-概念上，虚拟内存被组织为一个存放在磁盘上的 $N$ 个连续字节大小的单元的数组，它被缓存在主存中。
+概念上，虚拟内存被组织为一个存放在磁盘上大小为 $N$ 的字节数组，它被缓存在主存中。
 
 VM 系统将虚拟内存分割成**虚拟页**（Virtual Page, VP），每个虚拟页都包含 $P=2^p$ 个字节。
 
 类似地，物理内存被分割成**物理页**（Physical Page, PP），每个物理页也包含 $P$ 个字节，物理页也称为**页帧**（page frame）。
+
+页是数据在磁盘和主存之间传送的基本单元。
 
 一个虚拟页有三种状态：
 
@@ -2644,9 +2696,9 @@ VM 系统将虚拟内存分割成**虚拟页**（Virtual Page, VP），每个虚
 
 我们用 SRAM 缓存指 CPU 的 L1、L2 和 L3 缓存，用 DRAM 缓存指主存。
 
-DRAM 比 SRAM 慢约 $10$ 倍，但磁盘比 DRAM 慢约 $100000$ 多倍，而且从磁盘的一个扇区读取第一个字节的时间开销比起读这个扇区中连续的字节又要慢约 $100000$ 倍，因此，DRAM 缓存的组织结构完全是由巨大的不命中处罚驱动的。
+DRAM 比 SRAM 慢约 $10$ 倍，磁盘比 DRAM 慢约 $100000$ 多倍，而且从磁盘的一个扇区读取第一个字节的时间开销比起读这个扇区中连续的字节又要慢约 $100000$ 倍，因此，DRAM 缓存的组织结构完全是由巨大的不命中处罚驱动的。
 
-**虚拟页往往很大**，通常为 $4 \operatorname{KB}\sim 2 \operatorname{MB}$。
+**虚拟页往往很大**，通常为 $4 \text{KB}\sim 2 \text{MB}$。
 
 DRAM 是**全相联**的，即任何虚拟页都可以放置在任何物理页中。
 
@@ -2656,27 +2708,32 @@ DRAM 缓存总是**写回**，而不是直写。
 
 ### 页表
 
-VM 系统需要判定一个虚拟页是否已缓存、已缓存的虚拟页对应的物理页、未缓存的虚拟页对应的磁盘位置等，这些功能由操作系统、MMU 中的地址翻译硬件和常驻在物理内存中的**页表**（page table）提供。
+VM 系统需要判定一个虚拟页是否已缓存、已缓存的虚拟页对应的物理页、未缓存的虚拟页对应的磁盘位置等，这些功能由操作系统、MMU 中的地址翻译硬件和**常驻在物理内存**中的**页表**（page table）提供。
 
-页表是一个**页表条目**（Page Table Entry, **PTE**）数组。
+页表是**页表条目**（Page Table Entry, **PTE**）的数组。
 
 虚拟地址空间的每个页在页表的**固定**偏移处都有一个 PTE。PTE 由一个**有效位**（valid bit）和一个 $n$ 位的**地址字段**组成。
 
-有效位指示对应的虚拟页是否已缓存。若有效位被设置，地址字段就指示 **DRAM 缓存中对应的物理页的地址**；否则，如果地址字段是**空**的，则说明虚拟页**未分配**；如果地址字段是**非空**的，则虚拟页**已分配**，地址字段是**虚拟页在磁盘上的位置**。
+**有效位**指示对应的虚拟页**是否已缓存**。
 
-页表将虚拟页映射到物理页，每次地址翻译时，都会被地址翻译硬件读取。
+- 若有效位被设置，地址字段就指示**对应的物理页的地址**
+- 否则，
+  - 如果地址字段是**空**的，则说明虚拟页**未分配**
+  - 如果地址字段是**非空**的，则虚拟页**已分配**，地址字段是**虚拟页在磁盘上的位置**。
 
 ![](images/9-4-页表.png)
 
 ### 页命中
 
-CPU 试图读取 VP 2 中的字时，地址翻译硬件将虚拟地址作为索引定位 PTE 2。PTE 2 的有效位被设置，故 VP 2 已被缓存在 DRAM 中，这是一次**页命中**。地址翻译硬件使用 PTE 2 的地址字段（即 PP 1 的地址）构造出这个字的物理地址。
+CPU 试图读取 VP 2 中的字时，地址翻译硬件将虚拟页号 VPN 作为索引定位 PTE 2。
+
+PTE 2 的有效位被设置，故 VP 2 已被缓存在 DRAM 中，这是一次**页命中**。地址翻译硬件使用 PTE 2 的地址字段（即物理页号 PPN）构造出这个字的物理地址。
 
 ### 缺页
 
 DRAM 缓存不命中称为**缺页**（page fault）。
 
-CPU 试图读取 VP 3 中的字时，由于 VP 3 未缓存，会触发一个**缺页异常**。这调用内核的**缺页异常处理程序**，它选择**牺牲**一个页，此例中就是 VP 4。如果 VP 4 已经被修改了，那么内核会将它复制回磁盘（写回）。内核会修改 VP 4 的页表条目，将其有效位清零。
+CPU 试图读取 VP 3 中的字时，由于 VP 3 未缓存，会触发一个**缺页异常**。这调用内核的**缺页异常处理程序**，它选择**牺牲**一个页，此例中就是 VP 4。如果 VP 4 已经被修改了，那么内核会将它复制回磁盘（**写回**）。内核会修改 VP 4 的页表条目，将其有效位清零。
 
 然后，内核从磁盘复制 VP 3 到内存中的 PP 3（即 VP 4 的原缓存位置），更新 PTE 3 并返回。缺页处理程序返回时，会**重新执行引起缺页的指令**，这一次会页命中。
 
@@ -2706,7 +2763,9 @@ CPU 试图读取 VP 3 中的字时，由于 VP 3 未缓存，会触发一个**�
 
 虚拟地址空间通常比物理地址空间大，但在一些早期系统（DEC PDP-11/70），也可能比物理地址空间小。虚拟内存对这种系统也有用处。
 
-操作系统为每个进程提供了独立的页表，每个进程都有自己独立的虚拟地址空间。多个虚拟页可以映射到同一个物理页，这称为**共享**（sharing）。
+操作系统为每个进程提供了独立的页表，每个进程都有自己**独立**的虚拟地址空间。
+
+**多个虚拟页可以映射到同一个物理页**，这称为**共享**（sharing）。
 
 通过使用 VM 系统：
 
@@ -2740,8 +2799,8 @@ CPU 试图读取 VP 3 中的字时，由于 VP 3 未缓存，会触发一个**�
 
 $$
 \begin{gather*}
-    \operatorname{MAP}: \operatorname{VAS}\rightarrow\operatorname{PAS}\cup\varnothing, \\
-    \operatorname{MAP}(A) = \begin{cases}
+    \text{MAP}: \text{VAS}\rightarrow\text{PAS}\cup\varnothing, \\
+    \text{MAP}(A) = \begin{cases}
         A', & \text{if data at virtual addr. $A$ are present at physical addr. $A'$} \\
         \varnothing, & \text{if data at virtual addr. $A$ are not present in physical memory}
     \end{cases}
@@ -2793,13 +2852,13 @@ TLB 是**虚拟寻址**的，VPN 被分成 **TLB 标记位**和 **TLB 索引位*
 
 ### 多级页表
 
-如果我们有一个 $32$ 位的地址空间，页大小为 $4 \operatorname{KB}$，那么页表就需要 $2^{32}/2^{12}=2^{20}$ 个 PTE，每个 PTE 需要 $4$ 个字节，总共就需要 $4 \operatorname{MB}$ 的内存空间，这太大了。
+如果我们有一个 $32$ 位的地址空间，页大小为 $4 \text{KB}$，那么页表就需要 $2^{32}/2^{12}=2^{20}$ 个 PTE，每个 PTE 需要 $4$ 个字节，总共就需要 $4 \text{MB}$ 的内存空间，这太大了。
 
 我们使用多级页表来压缩空间。以一个二级页表为例：
 
-一级页表包含 $2^{10}$ 个 PTE，每个 PTE 指向一个二级页表。二级页表包含 $2^{10}$ 个 PTE，每个 PTE 对应一个虚拟页。使用 $4$ 字节的 PTE 时，一级页表和每个二级页表的大小都是 $4 \operatorname{KB}$，恰好与一个页的大小相同。
+一级页表包含 $2^{10}$ 个 PTE，每个 PTE 指向一个二级页表。二级页表包含 $2^{10}$ 个 PTE，每个 PTE 对应一个虚拟页。使用 $4$ 字节的 PTE 时，一级页表和每个二级页表的大小都是 $4 \text{KB}$，恰好与一个页的大小相同。
 
-一级页表的每个 PTE 对应虚拟地址空间中一个 $4 \operatorname{MB}$ 的**片**（chunk）。如果片 $i$ 中**所有**的页都是**未分配**的，那么一级 PTE $i$ 为空。
+一级页表的每个 PTE 对应虚拟地址空间中一个 $4 \text{MB}$ 的**片**（chunk）。如果片 $i$ 中**所有**的页都是**未分配**的，那么一级 PTE $i$ 为空。
 
 多级页表从两个方面节约了内存：
 
@@ -2834,9 +2893,9 @@ TLB 是**虚拟寻址**的，VPN 被分成 **TLB 标记位**和 **TLB 索引位*
 
 Intel Core i7 Haswell **处理器封装**（processor package）包括四个核心、一个所有核心共享的 L3 高速缓存、一个 DDR3 内存控制器。每个核心包含两级高速缓存和两级 TLB，以及一组基于 QuickPath 技术的点到点链路（允许核心与其他核心以及外部 I/O 桥直接通信）。
 
-TLB 虚拟寻址、四路组相联。L1、L2、L3 高速缓存物理寻址，L1 和 L2 $8$ 路组相联，L3 $16$ 路组相联，块大小是 $64$ 字节。页大小可以在启动时配置成 $4 \operatorname{KB}$ 或 $4 \operatorname{MB}$，Linux 一般使用 $4 \operatorname{KB}$。
+TLB 虚拟寻址、四路组相联。L1、L2、L3 高速缓存物理寻址，L1 和 L2 $8$ 路组相联，L3 $16$ 路组相联，块大小是 $64$ 字节。页大小可以在启动时配置成 $4 \text{KB}$ 或 $4 \text{MB}$，Linux 一般使用 $4 \text{KB}$。
 
-Haswell 架构允许完全的 $64$ 位虚拟和物理地址空间，但 Core i7 实现只支持 $48$ 位（$256 \operatorname{TB}$）虚拟地址空间和 $52$ 位（$4 \operatorname{PB}$）物理地址空间。Core i7 还有一个兼容模式，支持 $32$ 位（$4 \operatorname{GB}$）虚拟和物理地址空间。
+Haswell 架构允许完全的 $64$ 位虚拟和物理地址空间，但 Core i7 实现只支持 $48$ 位（$256 \text{TB}$）虚拟地址空间和 $52$ 位（$4 \text{PB}$）物理地址空间。Core i7 还有一个兼容模式，支持 $32$ 位（$4 \text{GB}$）虚拟和物理地址空间。
 
 ![](images/9-21-i7内存系统.png)
 
@@ -2854,19 +2913,19 @@ CR3 控制寄存器指向第一级页表 L1 的基址。CR3 的值是每个进�
 
 ![](images/9-23-PTE格式.png)
 
-|   字段    |                                         描述                                         |
-| :-------: | :----------------------------------------------------------------------------------: |
-|     P     |                             子页表是否已缓存到物理内存中                             |
-|    R/W    |                            对所有可访问页，只读或读写权限                            |
-|    U/S    |                    对所有可访问页，用户或超级用户（内核）模式权限                    |
-|    WT     |                              子页表采用直写还是写回策略                              |
-|    CD     |                                 子页表是否可以被缓存                                 |
-|     A     |                      引用位，由 MMU 在读或写时设置，由软件清除                       |
-|    PS     | 页大小，可以为 $4 \operatorname{KB}$ 或 $4 \operatorname{MB}$（只对第一层 PTE 定义） |
-| Base addr |                             子页表的物理基址的高 $40$ 位                             |
-|    XD     |                            对所有可访问页，是否允许取指令                            |
+|   字段    |                                 描述                                 |
+| :-------: | :------------------------------------------------------------------: |
+|     P     |                     子页表是否已缓存到物理内存中                     |
+|    R/W    |                    对所有可访问页，只读或读写权限                    |
+|    U/S    |            对所有可访问页，用户或超级用户（内核）模式权限            |
+|    WT     |                      子页表采用直写还是写回策略                      |
+|    CD     |                         子页表是否可以被缓存                         |
+|     A     |              引用位，由 MMU 在读或写时设置，由软件清除               |
+|    PS     | 页大小，可以为 $4 \text{KB}$ 或 $4 \text{MB}$（只对第一层 PTE 定义） |
+| Base addr |                     子页表的物理基址的高 $40$ 位                     |
+|    XD     |                    对所有可访问页，是否允许取指令                    |
 
-Linux 中，$P$ 总是为 $1$，此时地址字段包含一个 $40$ 位 PPN，它指向下一级页表的基址。这要求物理页表必须 **$4 \operatorname{KB}$ 对齐**。
+Linux 中，$P$ 总是为 $1$，此时地址字段包含一个 $40$ 位 PPN，它指向下一级页表的基址。这要求物理页表必须 **$4 \text{KB}$ 对齐**。
 
 第四级页表 PTE 的格式：
 
@@ -2893,7 +2952,7 @@ XD 位是 $64$ 位系统引入的，这使得内核降低了缓冲区溢出攻�
 
 内核可以调用一条内核模式指令来清除引用位和修改位。
 
-Core i7 MMU 将 $36$ 位的 VPN 划分成四个 $9$ 为的片，作为到页表中 PTE 的索引：
+Core i7 MMU 将 $36$ 位的 VPN 划分成四个 $9$ 位的片，作为到页表中 PTE 的索引：
 
 ![](images/9-25-页表翻译.png)
 
@@ -2904,7 +2963,7 @@ Core i7 MMU 将 $36$ 位的 VPN 划分成四个 $9$ 为的片，作为到页表�
 >
 > 这两个步骤可以部分重叠：
 >
-> 页大小为 $4 \operatorname{KB}$ 时，虚拟地址有 $12$ 位的 VPO，并且它和其对应的 PPO 相同。八路组相联、物理寻址的 L1 高速缓存有 $64$ 个组，块大小为 $64$ 字节，因此物理地址的低 $6$ 位是块偏移，中间 $6$ 位是组索引，高 $40$ 位是标记位。
+> 页大小为 $4 \text{KB}$ 时，虚拟地址有 $12$ 位的 VPO，并且它和其对应的 PPO 相同。八路组相联、物理寻址的 L1 高速缓存有 $64$ 个组，块大小为 $64$ 字节，因此物理地址的低 $6$ 位是块偏移，中间 $6$ 位是组索引，高 $40$ 位是标记位。
 > 因此，当 CPU 发送 VPN 给 MMU 时，它会同时发送 VPO 给 L1 高速缓存，从而可以让 **L1 高速缓存的组选择**和 **MMU 的页表查找**同时进行。
 
 ### Linux 虚拟内存系统
@@ -2936,7 +2995,7 @@ Linux 将虚拟内存划分成一些**区域**（area，又叫**段**，segment�
 
 - `vm_start`：区域的起始地址
 - `vm_end`：区域的结束地址
-- `vm_port`：区域内所有页的读写权限
+- `vm_prot`：区域内所有页的读写权限
 - `vm_flags`：区域内的页是否可和其他进程共享，以及一些其他信息
 - `vm_next`：指向下一个 `vm_area_struct` 的指针
 
@@ -2983,6 +3042,8 @@ Linux 通过将一个虚拟内存区域与一个磁盘上的**对象**（object�
 如果有进程试图写自己私有区域的某个页，那么这个写就会**触发一个保护故障**。故障处理程序会在物理内存中创建此程序的一个新副本，更新页表条目，然后恢复这个副本的可写权限。处理程序返回时，故障指令重新执行，这一次会成功写入。
 
 写时复制充分节约了物理内存资源。
+
+![](images/9-30-写时复制.png)
 
 ### 再看 `fork` 函数
 
@@ -3265,7 +3326,7 @@ Knuth 提出了**边界标记**（boundary tag）的方法：在每个块的尾�
 
 ### 综合：实现一个简单的分配器
 
-最大的块大小是 $2^32=4 \text{GB}$，代码是 64 位 clean 的，即可以不加修改地运行在 32 位（`gcc -m32`）和 64 位（`gcc -m64`）的进程上。
+最大的块大小是 $2^{32}=4 \text{GB}$，代码是 64 位 clean 的，即可以不加修改地运行在 32 位（`gcc -m32`）和 64 位（`gcc -m64`）的进程上。
 
 #### 通用分配器设计
 
@@ -3324,7 +3385,7 @@ extern void mm_free(void* ptr);
 
 序言块后是由 `malloc` 或者 `free` 调用创建的普通块。
 
-堆总是以一个**结尾块**（epilogue block）阶数，它是一个已分配块，大小为零，只包含一个头部。
+堆总是以一个**结尾块**（epilogue block）结束，它是一个已分配块，大小为零，只包含一个头部。
 
 序言块和结尾块是一种消除合并边界条件的技巧。分配器使用一个 `static` 的全局变量 `heap_listp`，指向序言块。（也可以让它指向下一个块）
 
@@ -3505,15 +3566,17 @@ static void place(void* bp, size_t asize) {
 
 ### 显式空闲链表
 
+我们不需要空闲块有效载荷中的数据，因此可以利用它存储一些额外的信息
+
 ![](images/9-48-双向链表堆块.png)
 
-在每个空闲块中包含一个 `pred` 指针和一个 `succ` 指针，指向前驱空闲块和后继空闲块。
+在每个空闲块中包含一个 `pred` 指针和一个 `succ` 指针，指向**前驱空闲块**和**后继空闲块**，构造一个**显式的双向空闲链表**
 
-这使得 first fit 的分配时间从块总数的线性时间降低到空闲块的线性时间。
+这使得 first fit 的分配时间从块总数的线性时间降低到了空闲块的线性时间。
 
-取决于空闲链表中块的排序策略，释放块的时间可能是线性的，也可能是常数的。
+取决于空闲链表中块的**排序策略**，释放块的时间可能是线性的，也可能是常数的：
 
-**后进先出**（LIFO）：新释放的块放置在链表的开始处。搜索时，分配器先检查最近使用过的块，释放块可以在常数时间内完成。如果使用了边界标记，那么合并也可以在常数时间内完成。
+**后进先出**（LIFO）：新释放的块放置在链表的开始处。搜索时，分配器先检查到的是最近使用过的块，释放块可以在常数时间内完成。如果使用了边界标记，那么合并也可以在常数时间内完成。
 
 **地址顺序**（address-ordered）：空闲块按地址顺序排列。释放块需要线性时间，但内存利用率更高，接近 best fit。
 
@@ -3525,7 +3588,7 @@ static void place(void* bp, size_t asize) {
 
 一般将所有可能的块大小分成一些等价类，称为**大小类**（size class）。以下是一个例子，其中小的块单独成类，大的块按 $2$ 的幂分类：
 
-$$\{1\}, \{2\}, \{3\}, \cdots, \{1023\}, \{1024\}, \{1025\sim2048\}, {2049\sim4096\}, {4097\sim\infty\}$$
+$$\{1\}, \{2\}, \{3\}, \cdots, \{1023\}, \{1024\}, \{1025\sim2048\}, \{2049\sim4096\}, \{4097\sim\infty\}$$
 
 每个大小类都有一个对应的空闲链表。
 
@@ -3547,7 +3610,7 @@ $$\{1\}, \{2\}, \{3\}, \cdots, \{1023\}, \{1024\}, \{1025\sim2048\}, {2049\sim40
 - 分配和释放的时间很短
 - **块不需要头部**：因为每个片都只有大小相同的块，所以已分配块的大小可以直接从地址推断。因为不用合并，所以块也不需要已分配 / 空闲的标记。
 - **块也不需要尾部**，因为不用合并
-- 块只需要携带一个 `succ` 指针，因此最小块大小就是一个字
+- 唯一需要的字段是空闲块携带的 `succ` 指针，因此最小块大小就是一个字
 
 缺点：不分割会造成**内部碎片化**，不合并又会造成**外部碎片化**
 
@@ -3592,8 +3655,190 @@ $$xxx\cdots x10000.$$
 
 ## 垃圾收集
 
+**垃圾收集器**（garbage collector）是一种动态内存分配器，它定期识别并回收不再使用的已分配块（垃圾）。
 
+### 垃圾收集器的基本知识
 
+垃圾收集器将内存视为一张**有向可达图**（reachability graph）。
+
+图的结点被分成一组根结点和一组堆结点，**每个堆结点对应一个已分配块**。有向边 $p\rightarrow q$ 意味着块 $p$ 中的某个位置指向块 $q$ 中的某个位置。
+
+根结点对应于**不在堆中，但指向堆中的块的指针**。这些指针可以是位于寄存器、栈中的局部变量，或虚拟内存数据区域中的全局变量。
+
+![](images/9-49-有向可达图.png)
+
+如果可以从根结点到达 $p$，那么 $p$ 就是可达的。不可达结点就是垃圾。
+
+ML 和 Java 的垃圾收集器对指针的创建的使用有严格的控制，能够精确地维护可达图，可以回收所有垃圾。但 C/C++ 的收集器通常无法精确地维护可达图，它们被称为**保守的垃圾收集器**（conservative garbage collector）。它们**将每个可达块都正确地识别为可达**，**但可能会将一些不可达块也识别为可达的**。
+
+保守的垃圾收集器可以作为 `malloc` 和 `free` 之间的一个**中间模块**。
+
+当 `malloc` 处理分配请求时，如果它找不到合适的空闲块，那么它就调用垃圾收集器，回收一些垃圾，然后再次搜索空闲块。如果仍然失败，那么它就向内核请求额外的堆内存。
+
+### Mark&Sweep 垃圾收集器
+
+Mark&Sweep 垃圾收集器由**标记**阶段和**清除**阶段组成。
+
+标记阶段标记出根结点的所有可达且已分配的后继。清除阶段释放所有未被标记的已分配块。
+
+通常用块头部中空闲低位中的一位来标记块。
+
+```c
+typedef void* ptr;
+
+// If p points to some word in an allocated block, returns the base address of that block. Otherwise, returns NULL
+ptr isPtr(ptr p);
+
+// Returns 1 if block b is marked
+int blockMarked(ptr b);
+
+// Returns 1 if block b is allocated
+int blockAllocated(ptr b);
+
+// Marks block b
+void markBlock(ptr b);
+
+// Returns the length in words (excluding the header) of block b
+int length(ptr b);
+
+// Unmarks block b
+void unmarkBlock(ptr b);
+
+// Returns the address of the next block of block b
+ptr nextBlock(ptr b);
+
+// If p points to a allocated & unmarked block, marks it and recursively marks all blocks that the block points to
+void mark(ptr p) {
+    if ((b = isPtr(p)) == NULL)
+        return;
+    if (blockMarked(b))
+        return;
+    markBlock(b);
+    len = length(b);
+    for (i = 0; i < len; i++)
+        mark(b[i]);
+}
+
+void sweep(ptr b, ptr end) {
+    while (b < end) {
+        if (blockMarked(b))
+            unmarkBlock(b);
+        else if (blockAllocated(b))
+            free(b);
+        b = nextBlock(b);
+    }
+}
+```
+
+标记阶段对**每个根结点**调用 `mark`。如果 `p` 没有指向已分配且未标记的块，立即返回；否则，标记块 `b`，并递归地检查块 `b` 中的每个字。
+
+最后，任何未标记的已分配块都被认为是垃圾。
+
+清除阶段调用 `sweep`，清除堆中所有的垃圾块。
+
+![](images/9-52-mark&sweep.png)
+
+上图中，$1\sim 6$ 初始都为已分配块。第 $2$、$5$ 个块是不可达的，因此在清除阶段被回收到空闲链表。
+
+### C 程序的保守 Mark&Sweep
+
+- C 不会用类型信息标记内存位置，因此 `isPtr` 难以明确地判断其参数 `p` 是不是指针。即使 `p` 是指针，也无法判断它指向的是不是**已分配块的有效载荷**
+
+我们将已分配块的集合维护成一颗**平衡二叉树**，其中左子树的块都被存放在小地址处，右子树的块都被存放在大地址处。
+
+这要求块头部中附加 `left` 字段和 `right` 字段，通过在平衡二叉树中二分查找 `p` 确定它是否指向已分配块的有效载荷。
+
+像 `int` 和 `float` 的变量可以伪装成指针，这对收集器而言是无法区分的。因此 C/C++ 垃圾收集器只能是保守的。
+
+## C 程序中常见的与内存有关的错误
+
+### 解引用坏指针
+
+进程的虚拟地址空间中有很多较大的**洞**，它们没有映射到任何有意义的数据。解引用这些地址会导致**段错误**（segmentation fault）。
+
+另一方面，试图写虚拟内存中的只读区域会导致**保护异常**。
+
+```c
+// scanf bug 是常见的解引用坏指针错误
+scanf("%d", &x);      // ok
+scanf("%d", x);       // 可能 segfault，可能 protection fault，最糟糕的情况会静默地 corrupt 内存
+```
+
+### 读未初始化的内存
+
+`malloc` 分配的堆内存是未初始化的。
+
+### 允许栈缓冲区溢出
+
+不要使用 `gets` 函数，换用 `fgets`。
+
+### 在类型大小上犯错
+
+```c
+int** A = (int**) Malloc(n * sizeof(int));    // 应该是 n * sizeof(int*)
+```
+
+这导致 `malloc` 分配的内存大小不够，我们可能写到超出数组 `A` 结尾的地方。如果写操作因此**覆写了这个已分配块的脚部**，那么在**释放**这个块时（这通常已经在很远的地方了），分配器就会出错。
+
+这是典型的“action at distance”的示例，很难调试。
+
+### 造成错位错误
+
+错位（off-by-one）错误是另一种写越界的错误：
+
+```c
+int** A = (int**) Malloc(n * sizeof(int*));
+for (int i = 0; i <= n; i++)    // 应该是 i < n
+    A[i] = (int*) Malloc(m * sizeof(int));
+```
+
+### 错误地解引用指针
+
+```c
+*size--;      // 应该是 (*size)--
+```
+
+一元运算符 `--` 和 `*` 的优先级相同，它们**从右向左**结合，造成了错误。
+
+### 错误地增减指针
+
+```c
+int* p = /* some address */;
+while (*p && *p != target)
+    p += sizeof(int);    // 应该是 p++
+```
+
+### 悬垂指针
+
+```c
+int* dangling(void) {
+    int x;
+    return &x;
+}
+```
+
+函数返回一个悬垂指针，它指向栈上一个已经消亡了的局部变量，写它的解引用可能污染栈上的其他数据。
+
+### 引用已经被释放的内存
+
+```c
+int* x;
+free(x);
+// ...
+*x = 1;
+```
+
+如果 `x` 存储的地址后来又成为了已分配块的一部分，那么写操作就会污染这个块。
+
+### 内存泄漏
+
+```c
+void leak(int n) {
+    int* p = (int*) Malloc(n * sizeof(int));
+}
+```
+
+`leak` 返回后，`p` 所分配的内存就再也无法访问到了。如果 `leak` 被经常调用，堆中就会充满这样的垃圾。对于长时间运行的程序影响很大。
 
 # 系统级 I/O
 
@@ -3619,7 +3864,7 @@ Linux shell 创建的每个进程，在开始时都有三个已打开的文件�
 // 以下常量可以代替显式的描述符值
 STDIN_FILENO    // standard input
 STDOUT_FILENO    // standard output
- STDERR_FILENO    // standard error
+STDERR_FILENO    // standard error
 ```
 
 **改变当前的文件位置**：对于每个已打开文件，内核维护一个**文件位置** $k$，初始值为 0，表示**从文件开头起的字节偏移量**。应用程序可以通过 `seek` 操作显式地设置文件的当前位置
@@ -3688,6 +3933,8 @@ int open(char* filename, int flags, mode_t mode);
 - $\text{S\_IWOTH}$：Others 可写
 - $\text{S\_IXOTH}$：Others 可执行
 
+其中 $S$ 代表 STAT，$I$ 代表 INODE。
+
 每个进程都有一个 `umask`，它是通过调用 `umask` 函数来设置的，它是**进程上下文的一部分**。
 
 ```c
@@ -3748,6 +3995,8 @@ RIO 提供了：
 
 ### RIO 的无缓冲的输入输出函数
 
+如果 `rio_readn` 和 `rio_writen` 被一个信号**中断**，那么它们会显式地重启 `read` 和 `write` 函数。这是为了代码的可移植性。
+
 ```c
 #include "csapp.h"
 
@@ -3760,7 +4009,7 @@ ssize_t rio_readn(int fd, void* usrbuf, size_t n) {
     while (nleft > 0) {
         if ((nread = read(fd, bufp, nleft)) < 0) {
             if (errno == EINTR)  // interrupted by sig handler return
-                nread = 0;       // and call read() again
+                nread = 0;       // call read() again
             else
                 return -1;       // errno set by read()
         } else if (nread == 0)   // EOF
@@ -3795,11 +4044,15 @@ ssize_t rio_writen(int fd, void* usrbuf, size_t n) {
 
 对同一个描述符，可以任意地交错调用 `rio_readn` 和 `rio_writen`。
 
-如果 `rio_readn` 和 `rio_writen` 被一个**从应用信号处理程序的返回**中断，那么它们会显式地重启 `read` 和 `write` 函数。为了可移植性，我们允许被中断的系统调用，在必要时重启它们。
-
 ### RIO 的带缓冲的输入函数
 
-带缓冲区的 I/O 函数可以提高性能，例如我们下面的 `rio_read` 一次性从
+带缓冲区的 I/O 函数可以提高性能。
+
+`rio_t` 结构体存放一个内部缓冲区。使用时先调用 `rio_readinitb` 注册一个 `rio_t` 结构体，然后调用 `rio_readlineb` 或 `rio_readnb` 读取数据。
+
+`rio_read` 是 helper function，它从内部缓冲区向用户缓冲区复制数据。内部缓冲区一旦为空，就会自动从 `rio_t` 指示的文件描述符中重新装填满。
+
+`rio_read` 和 `rio_t` 为 `rio_readlineb` 和 `rio_readnb` 提供了一层抽象，后两个函数可以将 `rio_read` 看成是系统调用 `read` 的一个等价替代。
 
 ```c
 #include "csapp.h"
@@ -3829,10 +4082,10 @@ static ssize_t rio_read(rio_t* rp, char* usrbuf, size_t n) {
     int cnt;
 
     while (rp->rio_cnt <= 0) {  // refill if buf is empty
-        rp->rio_cnt = read(rp->rio_fd, rp->rio_buf, sizeof(rp->rio_buf));
+        rp->rio_cnt = read(rp->rio_fd, rp->rio_buf, sizeof rp->rio_buf);
 
-        if (rp->rio_cnt < 0) {sig handler return
-            if (errno != EINTR)  // interrupted by
+        if (rp->rio_cnt < 0) {    
+            if (errno != EINTR)  // interrupted by sig handler return
                 return -1;
         }
         else if (rp->rio_cnt == 0)  // EOF
@@ -3842,9 +4095,7 @@ static ssize_t rio_read(rio_t* rp, char* usrbuf, size_t n) {
     }
 
     // copy min(n, rp->rio_cnt) bytes from internal buf to user buf
-    cnt = n;
-    if (rp->rio_cnt < n)
-        cnt = rp->rio_cnt;
+    cnt = rp->rio_cnt < n ? rp->rio_cnt : n;
     memcpy(usrbuf, rp->rio_bufptr, cnt);
     rp->rio_bufptr += cnt;
     rp->rio_cnt -= cnt;
@@ -3942,6 +4193,8 @@ S_ISDIR(m)    // is this a directory file?
 S_ISSOCK(m)    // is this a network socket?
 ```
 
+一个展示文件元数据的示例程序：
+
 ```c
 #include "csapp.h"
 
@@ -3997,6 +4250,8 @@ int closedir(DIR* dirp);
 ```
 
 区分 `readdir` 调用出错和流结束情况的**唯一**方法是检查 `errno` 是否被修改。
+
+一个打印目录中所有文件的程序示例：
 
 ```c
 #include "csapp.h"
@@ -4098,3 +4353,1130 @@ fclose(fpout);
 // 如果需要格式化输出，使用 sprintf 格式化一个字符串，再用 rio_writen 将它发送到套接口。
 // 如果需要格式化输入，使用 rio_readlineb 读取一个完整的文本行，再用 sscanf 解析它
 ```
+
+# 网络编程
+
+## 客户端-服务器编程模型
+
+每个网络应用都基于**客户端-服务器模型**（client-server model）。
+
+一个应用由一个**服务器**进程和一个或多个**客户端**进程组成。服务器管理并操作某种资源，为客户端提供服务。
+
+客户端-服务器模型中的基本操作是**事务**（transaction）：
+
+- 客户端需要服务时，向服务器发送一个**请求**（request），发起一个事务
+- 服务器收到请求，解释它，并操作它的资源
+- 服务器返回客户端一个**响应**（response），并等待下一个请求
+- 客户端收到响应，处理它
+
+客户端和服务器是**进程**，而不是**主机**（host）。
+
+## 网络
+
+客户端和服务器通常运行在不同的主机上，通过计算机网络的软硬件资源通信。
+
+对主机而言，网络只是一种 I/O 设备。插在 I/O 总线扩展槽上的**网络适配器**（network adapter）提供了到网络的物理接口。数据在网络和主存之间通过 I/O 和内存总线传送（通常为 DMA 传送）。
+
+物理上，网络是一个按照地理远近组成的层次系统。最底层是 **LAN**（Local Area Network，**局域网**），范围为一栋建筑或一个校园。最流行的局域网技术是**以太网**（Ethernet），它适应力极强，从 $3\text{ Mb/s}$ 演变到 $10\text{ Gb/s}$。
+
+一个**以太网段**（Ethernet segment）包括一些电缆（通常是双绞线）和一个**集线器**（hub）。
+
+以太网段的范围通常较小，约为一个房间或一个楼层。每根电缆的**最大位带宽**相同，为 $100 \text{ Mb/s}$ 或 $1\text{ Gb/s}$，一端连接到集线器的一个**端口**（port），另一端连接到主机的适配器。
+
+集线器不加分辨地将从一个端口上收到的所有位复制到其他所有端口上，因此，每台主机都能看到每个位。
+
+每个以太网适配器都有一个全球唯一的 $48$ 位地址，存储在这个适配器的非易失性存储器上。一台主机可以发送一段位（称为**帧**，frame）到同网段的其他任何主机。
+
+每个帧包括一个固定长度的**头部**（header），标识帧的源、目的和长度。其后就是存储数据的**有效载荷**（payload）。每个主机适配器都能看到这个帧，但只有目的主机实际读取它。
+
+使用一些电缆和**网桥**（bridge），可以将多个以太网段连接成较大的局域网，称为**桥接以太网**（bridged Ethernet），它的范围可以是一个建筑或一个校园。
+
+桥接以太网中，有些电缆连接网桥与网桥，另外一些电缆连接网桥和集线器。下图中，前者的带宽为 $1\text{ Gb/s}$，后者的带宽为 $100\text{ Mb/s}$。
+
+![](images/11-4-桥接以太网.png)
+
+网桥比集线器更充分地利用了电缆带宽。它们可以学习哪个主机通过哪个端口可达，只在有必要时，有选择地将帧从一个端口复制到其他端口。
+
+例如，如果主机 A 发送一个帧到同网段的主机 B，那么当这个帧到达网桥 X 的输入端口时，X 就会丢弃它。如果 A 发送一个帧到另一个网段的主机 C，那么 X 只会将此帧复制到和网桥 Y 相连的端口上，Y 只会将此帧复制到和 C 所在的网段连接的端口。
+
+我们将集线器和网桥以及电缆抽象为一根水平线，如图 11-5。
+
+多个不兼容的局域网可以通过**路由器**（router）连接起来，组成一个 **internet**（互联网络）。路由器是一种特殊的计算机，每台路由器对于它连接到的每个网络都有一个适配器（端口）。路由器也能连接**高速点到点电话连接**（high-speed point-to-point phone connections），它是 **WAN**（Wide-Area-Network, **广域网**）的一个例子。
+
+路由器可以由各种局域网和广域网构建 internet。如图 11-6，三台路由器连接了一对局域网和一对广域网。
+
+![](images/11-6-小型internet.png)
+
+互联网络可以由采用完全不同且互不兼容技术的各种局域网和广域网组成，每台主机和其他主机都是**物理相连**的。
+
+每台主机和路由器上运行着的**协议软件**（protocol software）消除了不同网络之间的差异，使得不兼容的网络中的主机之间也可以相互通信。协议软件实现一种协议，它有两种基本能力：
+
+- **命名机制**（naming scheme）：不同局域网技术有不同且不兼容的方式为主机分配地址。internet 协议定义了一种一致的主机地址格式，为每台主机分配至少一个 **internet address**（互联网络地址）
+- **传送机制**（delivery mechanism）：不同的联网技术中，帧的编码格式不同且不兼容。internet 协议定义了一种将数据位捆扎成不连续的片（称为**包**，packet）的方式。一个包由**包头**和**有效载荷**组成，包头包括包的大小、源主机地址、目的主机地址。
+
+![](images/11-7-internet主机通信.png)
+
+当主机 A 的客户端进程向主机 B 的服务器进程发送一串数据字节时：
+
+1. 主机 A 上的客户端进程进行一个系统调用，从客户端的虚拟地址空间复制数据到内核缓冲区
+2. 主机 A 上的协议软件通过在数据前附加 internet 包头和 LAN1 帧头，创建一个 LAN1 的帧
+3. LAN1 适配器复制此帧到网络上
+4. 到达路由器后，路由器的 LAN1 适配器从电缆上读取它，将它传送到协议软件
+5. 路由器从 internet 包头中提取出目的主机地址，作为路由表的索引，确定向哪里转发这个包（本例中为 LAN2）。路由器剥落 LAN1 帧头，附加寻址到主机 B 的 LAN2 帧头，创建一个 LAN2 帧，传送到 LAN2 适配器
+6. 路由器的 LAN2 适配器复制此帧到网络上
+7. 此帧到达主机 B 时，它的适配器从电缆上读到此帧，将它传送到协议软件
+8. 主机 B 的协议软件剥落包头和 LAN2 帧头。当服务器进程进行一个读取这些数据的系统调用时，协议软件将数据复制到主机 B 的虚拟地址空间
+
+## 全球 IP 因特网
+
+全球 IP 因特网（the global IP Internet）是最著名、最成功的 internet 实现。
+
+![](images/11-8-Internet应用的软硬件组织.png)
+
+每台 Internet 主机都运行着实现 **TCP/IP 协议**（Transmission Control Protocol/Internet Protocol, 传输控制协议/互联网络协议）的软件。
+
+Internet 的客户端和服务器混合使用**套接字接口函数**和 Unix I/O 函数通信。套接字接口函数通常被实现成系统调用，它们陷入内核，调用各种内核模式的 TCP/IP 函数。
+
+TCP/IP 实际上是一个协议族，每个都提供一些不同的功能。
+
+IP 协议提供基本的命名方法和传送机制。IP 协议中的包也叫**数据报**（datagram）。如果数据报在网络中丢失或重复，它并不会试图恢复，因此 IP 协议某种意义上并不可靠。**UDP**（Unreliable Datagram Protocol，**不可靠数据报协议**）是 IP 协议的扩展，它使得包可以在进程之间（而不是主机之间）传送。TCP 是构建在 IP 之上的复杂协议，提供了进程之间可靠的**全双工连接**（full duplex connections）。
+
+我们不讨论 UDP，将 TCP/IP 整体看作一个协议。
+
+从程序员角度，可以将 Internet 看作一个世界范围的主机集合，它：
+
+- 被映射为一组 $32$ 位的 IP 地址
+- 这组 IP 地址被映射为称为 **Internet 域名**（domain name）的标识符
+- Internet 主机上的进程可以通过**连接**（connection）和 Internet 上其他任何主机上的进程通信
+
+> 最初的 Internet 协议使用 $32$ 位地址，称为 Internet Protocol Version 4, IPv4。Internet 工程任务组织（Internet Engineering Task Force, IETF）提出了一个新版本的 IP，称为 IPv6，使用 $128$ 位地址。
+> 现在（2023 年 12 月），Google 用户中 IPv6 的使用率约为 42%。
+
+### IP 地址
+
+IP 地址是一个 $32$ 位无符号整数，用于**标识主机**。它被存放在一个结构体中：
+
+```c
+struct in_addr {
+    uint32_t s_addr;  // 32-bit IPv4 address (big-endian)
+};
+```
+
+这是一个失败的设计，为 IP 地址定义一个标量类型更有意义。
+
+TCP/IP 为任意整数数据定义了统一的**网络字节顺序**（network byte order），即采用大端法存储。Unix 提供了转换字节顺序的函数：
+
+```c
+#include <arpa/inet.h>
+
+uint32_t htonl(uint32_t hostint32);  // host to network long
+uint16_t htons(uint16_t hostint16);  // host to network short
+
+uint32_t ntohl(uint32_t netint32);   // network to host long
+uint16_t ntohs(uint16_t netint16);   // network to host short
+
+// there's no 64-bit versions of these functions
+```
+
+IP 地址通常通过**点分十进制表示法**（dotted-decimal notation）表示，每个字节由它的十进制值表示，字节之间用点分隔。例如，`128.2.194.242` 就表示地址 `0x8002c2f2`。
+
+```bash
+hostname -i    # print IP address
+```
+
+可以用以下函数实现 IP 地址和点分十进制串的转换。函数名中，`n` 表示 network，代表 IP 地址；`p` 表示 presentation，代表点分十进制串。$\text{AF\_INET}$ 表示 IPv4 地址，$\text{AF\_INET6}$ 表示 IPv6 地址。
+
+```c
+#include <arpa/inet.h>
+
+// 返回：若成功则返回 1，若 src 非法则返回 0，若出错则返回 -1
+int inet_pton(AF_INET, const char* src, void* dst);
+
+// size 规定了向 dst 复制的字节数的上限，得到的字符串以 NULL 结尾
+// 返回：若成功则返回指向 dst 的指针，若出错则返回 NULL
+const char* inet_ntop(AF_INET, const void* src, char* dst, socklen_t size);
+```
+
+### Internet 域名
+
+Internet 客户端和服务器互相通信时使用的是 IP 地址，它不方便记忆。Internet 定义了**域名**（domain name），它是一串句点分隔的标识符（标识符可以包含字母、数字和连字符），例如 `pku.edu.cn`
+
+域名集合形成了一个树形的层次结构。从树的叶结点到根结点的路径形成了域名，子树形成了**子域名**（subdomain）。
+
+![](images/11-10-Internet域名集合的一个子集.png)
+
+**一级域名**由非营利组织 ICANN（Internet Corporation for Assigned Names and Numbers）定义，包括 `com`、`edu`、`gov`、`net`、`org`。
+
+二级域名，例如 `cmu.edu`，是由 ICANN 的各个授权代理按先到先服务的方式分配的。一旦一个组织得到了一个二级域名，它就可以在这个子域名下创建任何新域名了，例如 `cs.cmu.edu`
+
+Internet 定义了从域名集合到 IP 地址集合的映射，直到 1988 年，这个映射都是通过一个叫做 `HOSTS.TXT` 的文件手工维护的。1988 年起，这个映射通过分布在世界范围内的 DNS（Domain Name System）维护。
+
+DNS 数据库由上百万的**主机条目结构**（host entry structure）组成，每条定义一组域名和一组 IP 地址之间的映射。
+
+```bash
+# nslookup 打印某个域名对应的 IP 地址
+nslookup cs.mit.edu
+```
+
+每台 Internet 主机都有本地定义的域名 `localhost`，它被映射为**回送地址**（loopback address）`127.0.0.1`
+
+可以用 `hostname` 确定本地主机的实际域名
+
+```bash
+hostname
+```
+
+一个合法的域名可以映射到一个或多个 IP 地址，也可以不映射到任何 IP 地址（比如 `edu`）。多个域名也可以映射到同一个 IP 地址。
+
+### Internet 连接
+
+Internet 客户端和服务器通过在**连接**（connection）上发送和接收字节流来通信。连接是
+
+- **点对点**的：进程对进程
+- **全双工**的：数据可以同时双向流动的
+- **可靠**的：源进程发送的字节流最终会被目的进程接收到，且接收到的字节流的顺序保证与发送的顺序相同（除非电缆被切断了）
+
+一个**套接字**（socket）是连接的一个端点。每个套接字都有相应的**套接字地址**，由一个 Internet 地址和一个 $16$ 位整数**端口**组成，表示为 `address:port`。
+
+客户端进程发起一个连接请求时，内核自动分配客户端套接字地址中的端口，称为**临时端口**（ephemeral port）。**临时端口的范围是 $1024\sim 5000$**。
+
+服务器套接字地址中的端口通常是某个永久与该服务绑定的**知名端口**（well-known port），每个具有知名端口的服务都有一个对应的**知名服务名**（well-known service name）。例如，Web 服务器通常使用端口 `80`，知名服务名是 `http`，电子邮件服务器通常使用端口 `25`，知名服务名是 `smtp`。
+
+`/etc/services` 文件列出了机器提供的知名名字和知名端口的映射。
+
+一个连接由它两端的套接字地址唯一确定，这对套接字地址称作**套接字对**（socket pair），表示为 `(cliaddr:cliport, servaddr:servport)`
+
+## 套接字接口
+
+**套接字接口**（socket interface）是一组函数，它们可以和 Unix I/O 函数结合起来开发网络应用。
+
+![](images/11-12-socket接口概述.png)
+
+### 套接字地址结构体
+
+对于 Linux 内核来说，套接字就是通信的端点。
+
+对于 Linux 程序来说，套接字就是一个打开的文件。
+
+Internet 的套接字地址存放在 $16$ 字节大的结构体 `sockaddr_in` 中。
+
+```c
+// IP socket address structure
+struct sockaddr_in {
+    uint16_t sin_family;  // Protocol family (always AF_INET)
+    uint16_t sin_port;    // Port number in network byte order
+    struct in_addr sin_addr;  // IP address in network byte order
+    unsigned char sin_zero[8]; // Pad to sizeof(struct sockaddr)
+};
+
+// Generic socket address structure (for connect, bind, and accept)
+struct sockaddr {
+    uint16_t sa_family;  // Protocol family
+    char sa_data[14];    // Address data
+};
+```
+
+`_in` 后缀是 internet 的缩写。
+
+`sa_family` 是 $2$ 字节的地址家族。
+
+对于 Internet 应用，`sin_family` 为 $\text{AF\_INET}$，`sin_port` 为端口号，`sin_addr` 为 IP 地址。
+
+`connect`、`bind` 和 `accept` 函数要求一个指向与协议相关的 `sockaddr` 结构体的指针。这需要泛型，然而当时的 C 中连 `void*` 类型都没有。
+
+因此，套接字函数被定义为接受一个 `sockaddr*` 类型的参数，然后要求应用程序将协议特定的结构体指针强制转换为该类型。它是所有协议特定的套接字地址结构体的**虚父类**。
+
+为了简便：
+
+```c
+typedef struct sockaddr SA;
+```
+
+### `socket` 函数
+
+客户端和服务器使用 `socket` 函数创建一个**套接字描述符**（socket descriptor）
+
+```c
+#include <sys/types.h>
+#include <sys/socket.h>
+
+// 返回：若成功则为非负描述符，若出错则为 -1
+int socket(int domain, int type, int protocol);
+```
+
+`domain` 参数指明网络层地址家族，对于 IPv4 地址，它是 $\text{AF\_INET}$。
+
+`type` 参数指明传输层协议：
+
+- $\text{SOCK\_STREAM}$：TCP 字节流
+- $\text{SOCK\_DGRAM}$：UDP 数据报
+
+例如，如果想要使套接字成为连接的一个端点：
+
+```c
+clientfd = Socket(AF_INET, SOCK_STREAM, 0);
+```
+
+更好的方法是使用 `getaddrinfo`，使得代码拥有更好的可移植性。
+
+`socket` 返回的 `clientfd` 只是**部分打开**的，还不能用于读写。
+
+### `bind` 函数
+
+服务器调用 `bind` 函数来告诉内核将 `addr` 中的服务器套接字地址和套接字描述符 `sockfd` 绑定。
+
+```c
+#include <sys/socket.h>
+
+// 返回：若成功则为 0，若出错则为 -1，并设置 errno
+int bind(int sockfd, const struct sockaddr* addr, socklen_t addrlen);
+```
+
+`addrlen` 还是 `sizeof sockaddr_in`。
+
+客户程序不需要调用 `bind`，内核会自动为其在 $1024\sim 5000$ 之间分配一个端口号。
+
+### `connect` 函数
+
+客户端调用 `connect` 函数向服务器发送连接请求。
+
+```c
+#include <sys/socket.h>
+
+// 返回：若成功则为 0，若出错则为 -1
+int connect(int clientfd, const struct sockaddr* addr, socklen_t addrlen);
+```
+
+`addrlen` 是 `sizeof sockaddr_in `。
+
+`connect` 函数会阻塞，直到连接成功建立或发生错误。若成功，`clientfd` 就可以开始读写了，并且得到的连接由套接字对
+
+```c
+(x:y, addr.sin_addr:addr.sin_port)
+```
+
+刻画，其中 `x` 是客户端的 IP 地址，`y` 是临时端口，它唯一确定了客户端进程。
+
+和 `socket` 一样，最好用 `getaddrinfo` 为 `connect` 提供参数。
+
+### `listen` 函数
+
+默认地，内核认为 `socket` 函数创建的描述符对应于**主动套接字**（active socket），属于这个连接的客户端一方。
+
+服务器调用 `listen` 函数，让内核将 `sockfd` 由主动套接字转换为**监听套接字**（listening socket），该套接字可以接受来自客户端的连接请求。
+
+`backlog` 参数设定了**监听队列长度**，通常为 $1024$。超过此长度后，内核开始拒绝连接请求。
+
+```c
+#include <sys/socket.h>
+
+// 返回：若成功则为 0，若出错则为 -1
+int listen(int sockfd, int backlog);
+```
+
+### `accept` 函数
+
+服务器调用 `accept` 函数等待来自客户端的连接请求到达**监听描述符**（listening descriptor），然后在 `addr` 中填写客户端的套接字地址，返回一个**已连接描述符**（connected descriptor）。
+
+已连接描述符可以用来利用 Unix I/O 函数和客户端通信，它是临时的，需要在通信完毕后调用 `close` 关闭。
+
+```c
+#include <sys/socket.h>
+
+// 返回：若成功则为非负描述符，若出错则为 -1
+int accept(int listenfd, struct sockaddr* addr, socklen_t* addrlen);
+```
+
+监听描述符是客户端连接请求的一个端点，通常**只被创建一次**，存在于**服务器的整个生命周期**。
+
+已连接描述符是客户端和服务器之间已经建立起来的连接的一个端点。**服务器每次接受连接请求时都会被创建**，只存在于**服务器为一个客户端服务的过程中**。
+
+![](images/11-14-监听描述符和已连接描述符.png)
+
+客户端和服务器建立连接的过程：
+
+1. 服务器调用 `accept`，等待连接请求到达监听描述符 `listenfd`（假设为 $3$）
+2. 客户端调用 `connect`，向服务器发送一个连接请求
+3. `accept` 函数打开了一个新的**已连接描述符** `connfd`（假设为 $4$），在 `clientfd` 和 `connfd` 之间建立连接，并返回 `connfd` 给应用程序。客户端也从 `connect` 返回。
+4. 此后，客户端和服务器就可以分别读写 `clientfd` 和 `connfd` 来回传送数据了
+
+> 区别监听描述符和已连接描述符是很有必要的，它可以是我们建立并发服务器，同时处理许多客户端连接。
+
+### `close` 函数
+
+客户端和服务器调用 `close` 函数关闭一个套接字描述符。
+
+```c
+#include <unistd.h>
+
+// 返回：若成功则为 0，若出错则为 -1
+int close(int fd);
+```
+
+如果 `fd` 是 TCP 套接字描述符，调用 `close` 会引起**本地进程向远程进程发送关闭连接的消息**，连接关闭后，相关的资源被释放。
+
+### 主机和服务的转换
+
+#### `getaddrinfo` 函数
+
+`getaddrinfo` 将主机名、主机地址、服务名和端口号的字符串表示转化成 `sockaddr` 结构体。它是已弃用的 `gethostbyname` 和 `getservbyname` 的替代。
+
+`getaddrinfo` 是**可重入**的，适用于各种协议。
+
+```c
+#include <sys/types.h>
+#include <sys/socket.h>
+#include <netdb.h>
+
+// 返回：若成功则为 0，若出错则为非 0 的错误代码
+int getaddrinfo(const char* host, const char* service,
+                const struct addrinfo* hints, struct addrinfo** result);
+
+// 返回：无
+void freeaddrinfo(struct addrinfo* result);
+
+// 返回：错误消息
+const char* gai_strerror(int errcode);
+```
+
+`result` 是一个指向 `struct addrinfo*` 类型的指针，或者说，一个指向 `addrinfo` 链表的指针。
+
+`getaddrinfo` 会在函数体内**为 `*result` 赋值**，如果将可能为 `NULL` 的 `result` 传给 `getaddrinfo`，那么就会触发 segfault。
+
+```c
+// correct usage
+struct addrinfo *results;
+getaddrinfo("localhost", "http", NULL, &results);
+```
+
+`addrinfo` 结构体定义如下：
+
+```c
+struct addrinfo {
+    int ai_flags;           // Hints argument flags
+    int ai_family;          // First arg to socket function
+    int ai_socktype;        // Second arg to socket function
+    int ai_protocol;        // Third arg to socket function
+    char* ai_canonname;     // Canonical hostname
+    size_t ai_addrlen;      // Size of ai_addr struct
+    struct sockaddr* ai_addr;   // Ptr to socket address structure
+    struct addrinfo* ai_next;   // Next in linked list
+};
+```
+
+![](images/11-15-addrinfo.png)
+
+`result` 指向的链表中，每个 `addrinfo` 结构体的 `ai_addr` 字段指向一个 `sockaddr` 结构体。
+
+为了避免内存泄漏，必须调用 `freeaddrinfo` 释放 `getaddrinfo` 分配的内存。
+
+如果 `getaddrinfo` 返回非零的错误代码，可以调用 `gai_strerror` 打印对应的错误消息。
+
+`host` 参数可以是域名，也可以是点分十进制的 IP 地址。`service` 参数可以是服务名（如 `http`），也可以是十进制端口号。如果不想将主机名转换成地址，可以将 `host` 设为 `NULL`；如果不想将服务名转换成端口号，也可以将 `service` 设为 `NULL`，但不能同时将两者都设为 `NULL`。
+
+`hints` 参数是可选的，它提供对返回的链表更好的控制。传递的 `hints` 参数指向的结构体只能设置以下字段，其余字段必须被置零：
+
+- `ai_family`：设置为 $AF\_INET$ 将限制为 IPv4 地址，设置为 $AF\_INET6$ 将限制为 IPv6 地址
+- `ai_socktype`：`getaddrinfo` 默认最多返回三个 `addrinfo` 结构体，它们的 `ai_socktype` 字段不同：一个是连接，一个是数据报，一个是原始套接字。设置为 $SOCK\_STREAM$ 将限制为对每个地址最多一个 `addrinfo` 结构体，对应连接。
+- `ai_flags`：一个位掩码，包括以下标志，它们可以用或运算组合：
+  - $AI\_ADDRCONFIG$：对于连接来说推荐。只返回适用于主机的地址，主机是 IPv4，就只返回 IPv4 地址；主机是 IPv6，就只返回 IPv6 地址。
+  - $AI\_CANONNAME$：`ai_canonname` 字段默认为 `NULL`，设置此标志将使得 `getaddrinfo` 将链表中首个 `addrinfo` 结构体的 `ai_canonname` 置为主机的规范名（canonical name）。
+  - $AI\_NUMERICSERV$：`service` 参数默认为服务名或端口号，此标志强制 `service` 参数为端口号。
+  - $AI\_PASSIVE$：`getaddrinfo` 返回的默认为套接字地址，客户端可以在调用 `connect` 时将其用作主动套接字。设置此标志令 `getaddrinfo` 返回可以被服务器用作监听套接字的**通配符地址**（wildcard address），告诉内核这个服务器会接受发送到该主机所有 IP 地址的请求。此时，`host` 参数应为 `NULL`
+- `ai_protocol`
+
+`getaddrinfo` 的一个重要好处在于 `addrinfo` 结构体的字段是**不透明**的，程序员可以直接将它们传递给套接字接口中的函数，使得代码可移植性更好。
+
+客户端建立连接时，先调用 `getaddrinfo`，然后遍历返回的链表，依次对每个套接字地址尝试调用 `socket` 和 `connect`，直到成功建立连接。
+
+服务器开始监听连接请求时，也先调用 `getaddrinfo`，遍历这个链表，依次对每个套接字地址尝试调用 `socket` 和 `bind`，直到描述符被绑定到合法的套接字地址。
+
+#### `getnameinfo` 函数
+
+`getnameinfo` 将 `sockaddr` 结构体转换成主机名和服务名。它是已弃用的 `gethostbyaddr` 和 `getservbyport` 的替代。
+
+`getnameinfo` 是**可重入**的，适用于各种协议。
+
+```c
+#include <sys/types.h>
+#include <netdb.h>
+
+// 返回：若成功则为 0，若出错则为非 0 的错误代码
+int getnameinfo(const struct sockaddr* sa, socklen_t salen,
+                char* host, size_t hostlen,
+                char* service, size_t servlen,
+                int flags);
+```
+
+`getnameinfo` 函数将 `sa` 指向的 `sockaddr` 结构体转换成主机名和服务名，存放在 `host` 和 `service` 中。
+
+如果 `getnameinfo` 返回非零的错误代码，可以调用 `gai_strerror` 打印对应的错误消息。
+
+如果不想要主机名，可以将 `host` 置为 `NULL`，将 `hostlen` 置为 `0`；如果不想要服务名，可以将 `service` 置为 `NULL`，将 `servlen` 置为 `0`，但不能同时将两者都置为 `NULL`。
+
+`flags` 是一个位掩码，包括以下标志，它们可以用或运算组合：
+
+- $NI\_NUMERICHOST$：`getnameinfo` 默认返回 `host` 的域名，设置此标志将使得 `getnameinfo` 返回 `host` 的点分十进制 IP 地址
+- $NI\_NUMERICSERV$：`getnameinfo` 默认检查 `/etc/services`，优先返回 `service` 的服务名，设置此标志将使得 `getnameinfo` 跳过查找，直接返回 `service` 的端口号
+
+以下示例程序使用 `getaddrinfo` 和 `gethostinfo` 展示域名和它关联的 IP 地址的映射，类似于 `nslookup`：
+
+```c
+#include "csapp.h"
+
+int main(int argc, char** argv) {
+    struct addrinfo* p;
+    struct addrinfo* listp;
+    struct addrinfo hints;
+
+    char buf[MAXLINE];
+    int rc, flags;
+
+    if (argc != 2) {
+        fprintf(stderr, "usage: %s <domain name>\n", argv[0]);
+        exit(0);
+    }
+
+    /* Get a list of addrinfo records */
+    memset(&hints, 0, sizeof(struct addrinfo));
+    hints.ai_family = AF_INET;  /* IPv4 only */
+    hints.ai_socktype = SOCK_STREAM;  /* Connections only */
+    if ((rc = getaddrinfo(argv[1], NULL, &hints, &listp)) != 0) {
+        fprintf(stderr, "getaddrinfo error: %s\n", gai_strerror(rc));
+        exit(1);
+    }
+
+    /* Walk the list and display each IP address */
+    flags = NI_NUMERICHOST;  /* Display address string instead of domain name */
+    for (p = listp; p; p = p->ai_next) {
+        Getnameinfo(p->ai_addr, p->ai_addrlen, buf, MAXLINE, NULL, 0, flags);
+        printf("%s\n", buf);
+    }
+
+    /* Clean up */
+    Freeaddrinfo(listp);
+
+    exit(0);
+}
+```
+
+### 套接字接口的辅助函数
+
+#### `open_clientfd` 函数
+
+客户端调用 `open_clientfd` 与运行在 `hostname` 主机上、通过端口号 `port` 监听连接请求的服务器进程建立连接。它返回一个打开的套接字描述符，可以用 Unix I/O 函数进行读写。
+
+以上的代码与 IP 版本无关，是干净可移植的。
+
+```c
+#include "csapp.h"
+
+// 返回：若成功则为套接字描述符，若出错则为 -1
+int open_clientfd(char* hostname, char* port) {
+    int clientfd;
+    struct addrinfo hints
+    struct addrinfo* listp;
+    struct addrinfo* p;
+
+    /* Get a list of potential server addresses */
+    memset(&hints, 0, sizeof(struct addrinfo));
+    hints.ai_socktype = SOCK_STREAM;  /* Open a connection */
+    hints.ai_flags = AI_NUMERICSERV;  /* ... using a numeric port arg. */
+    hints.ai_flags |= AI_ADDRCONFIG;  /* Recommended for connections */
+    Getaddrinfo(hostname, port, &hints, &listp);
+
+    /* Walk the list for one that we can successfully connect to */
+    for (p = listp; p; p = p->ai_next) {
+        /* Create a socket descriptor */
+        if ((clientfd = socket(p->ai_family, p->ai_socktype, p->ai_protocol)) < 0)
+            continue;  /* Socket failed, try the next */
+
+        /* Connect to the server */
+        if (connect(clientfd, p->ai_addr, p->ai_addrlen) != -1)
+            break;  /* Success */
+
+        Close(clientfd);  /* Connect failed, try another */
+    }
+
+    /* Clean up */
+    Freeaddrinfo(listp);
+    if (!p)  /* All connects failed */
+        return -1;
+    else  /* The last connect succeeded */
+        return clientfd;
+}
+```
+
+#### `open_listenfd` 函数
+
+服务器调用 `open_listenfd` 打开一个与 `port` 端口关联的监听描述符，它监听来自任意 IP 地址的客户端的连接请求。
+
+```c
+#include "csapp.h"
+
+// 返回：若成功则为监听描述符，若出错则为 -1
+int open_listenfd(char* port) {
+    struct addrinfo hints;
+    struct addrinfo* listp;
+    struct addrinfo* p;
+    int listenfd, optval = 1;
+
+    /* Get a list of potential server addresses */
+    memset(&hints, 0, sizeof(struct addrinfo));
+    hints.ai_socktype = SOCK_STREAM;  /* Accept connections */
+    hints.ai_flags = AI_PASSIVE | AI_ADDRCONFIG;  /* ... on any IP address */
+    hints.ai_flags |= AI_NUMERICSERV;  /* ... using port number */
+    Getaddrinfo(NULL, port, &hints, &listp);
+
+    /* Walk the list for one that we can bind to */
+    for (p = listp; p; p = p->ai_next) {
+        /* Create a socket descriptor */
+        if ((listenfd = socket(p->ai_family, p->ai_socktype, p->ai_protocol)) < 0)
+            continue;  /* Socket failed, try the next */
+
+        /* Eliminates "Address already in use" error from bind */
+        Setsockopt(listenfd, SOL_SOCKET, SO_REUSEADDR, (const void*)&optval, sizeof(int));
+
+        /* Bind the descriptor to the address */
+        if (bind(listenfd, p->ai_addr, p->ai_addrlen) == 0)
+            break;  /* Success */
+
+        Close(listenfd);  /* Bind failed, try the next */
+    }
+
+    /* Clean up */
+    Freeaddrinfo(listp);
+    if (!p)  /* No address worked */
+        return -1;
+
+    /* Make it a listening socket ready to accept connection requests */
+    if (listen(listenfd, LISTENQ) < 0) {
+        Close(listenfd);
+        return -1;
+    }
+    return listenfd;
+}
+```
+
+我们使用了 `setsockopt` 函数配置服务器，使得服务器可以被立即终止、重启，并且可以立即开始接受连接请求。一个重启的服务器默认将在约 $30$ 秒内开始拒绝客户端的连接请求，这不利于调试。
+
+我们使用了 $\text{AI\_PASSIVE}$ 标志，并将 `host` 置为了 `NULL`，这使得 `getaddrinfo` 返回一个通配符地址，告诉内核这个服务器会接受发送到该主机所有 IP 地址的请求。
+
+### echo 客户端和服务器的示例
+
+echo 客户端先和服务器建立连接，然后进入循环，反复从标准输入读取文本行，发送给服务器，再从服务器接收回送的文本行，打印到标准输出。
+
+当 `fgets` 在标准输入中遇到 EOF，或用户键入 `Ctrl+D` 时，循环终止，客户端关闭套接字描述符，这会发送一个 EOF 通知给服务器。
+
+对于此程序，实际上不需要显式地调用 `Close` 来关闭套接字描述符，因为程序终止时，客户端的内核会自动将其关闭。
+
+```c
+#include "csapp.h"
+
+int main(int argc, char** argv) {
+    int clientfd;
+    char* host;
+    char* port;
+    char buf[MAXLINE];
+    rio_t rio;
+
+    if (argc != 3) {
+        fprintf(stderr, "usage: %s <host> <port>\n", argv[0]);
+        exit(0);
+    }
+    host = argv[1];
+    port = argv[2];
+
+    clientfd = Open_clientfd(host, port);
+    Rio_readinitb(&rio, clientfd);
+
+    while (Fgets(buf, MAXLINE, stdin) != NULL) {
+        Rio_writen(clientfd, buf, strlen(buf));
+        Rio_readlineb(&rio, buf, MAXLINE);
+        Fputs(buf, stdout);
+    }
+    Close(clientfd);  
+    exit(0);
+}
+```
+
+echo 服务器先打开一个监听描述符，然后进入循环，等待一个来自客户端的连接请求，输出连接到的客户端的域名和 IP 地址，并调用 `echo` 函数为它们提供服务。
+
+我们将 `clientaddr` 声明成了 `struct sockaddr_storage`（而不是 `struct sockaddr_in`），这是一个足够大的结构体，可以容纳任何套接字地址，使得代码协议无关。
+
+此服务器一次只能处理一个客户端，即它一次一个地在客户端之间迭代，称为**迭代服务器**（iterative server）
+
+```c
+#include "csapp.h"
+
+void echo(int connfd) {
+    size_t n;
+    char buf[MAXLINE];
+    rio_t rio;
+
+    Rio_readinitb(&rio, connfd);
+    while ((n = Rio_readlineb(&rio, buf, MAXLINE)) != 0) {
+        printf("server received %d bytes\n", n);
+        Rio_writen(connfd, buf, n);
+    }
+}
+
+int main(int argc, char** argv) {
+    int listenfd;
+    int connfd;
+    socklen_t clientlen;
+    struct sockaddr_storage clientaddr;    // Enough space for any address
+    char client_hostname[MAXLINE];
+    char client_port[MAXLINE];
+
+    if (argc != 2) {
+        fprintf(stderr, "usage: %s <port>\n", argv[0]);
+        exit(0);
+    }
+
+    listenfd = Open_listenfd(argv[1]);
+
+    while (1) {
+        clientlen = sizeof(struct sockaddr_storage);
+        connfd = Accept(listenfd, (SA*)&clientaddr, &clientlen);
+        Getnameinfo((SA*)&clientaddr, clientlen, client_hostname, MAXLINE, client_port, MAXLINE, 0);
+        printf("Connected to (%s, %s)\n", client_hostname, client_port);
+        echo(connfd);
+        Close(connfd);
+    }
+    exit(0);
+}
+```
+
+> 并不存在 EOF 字符。EOF 是内核检测的一种条件。应用程序在调用 `read` 得到零返回值时、读磁盘文件超出文件长度时、Internet 连接时进程关闭套接字描述符时，都会发生 EOF 条件。
+
+## Web 服务器
+
+### Web 基础
+
+Web 客户端和服务器之间使用 **HTTP**（HyperText Transfer Protocol）协议通信。
+
+Web 客户端（浏览器）打开一个到服务器的 Internet 连接，请求某些**内容**。服务器响应此请求，关闭连接。浏览器读取这些内容，将它们显示在屏幕上。
+
+Web 内容可以用 **HTML**（HyperText Markup Language）编写，它是一种用于描述文档的标记语言。HTML 可以包含超链接，指向存放在任何 Internet 主机上的内容。
+
+> 万维网（World Wide Web）由 Tim Berners-Lee 在 1989 年发明，是一种基于超文本的分布式信息系统。
+
+### Web 内容
+
+**内容**是一个与 MIME（Multipurpose Internet Mail Extensions）类型相关联的字节序列。
+
+常用的 MIME 类型：
+
+- `text/html`：HTML 页面
+- `text/plain`：纯文本
+- `application/postscript`：PostScript 文档
+- `image/jpeg`：JPEG 图像
+- `image/gif`：GIF 图像
+- `image/png`：PNG 图像
+
+Web 服务器以两种不同的方式向客户端提供内容：
+
+- 取一个磁盘文件（称为**静态内容**，static content），将其内容返回给客户端（称为**服务静态内容**，serving static content）。
+- 运行一个可执行文件，将其输出（称为动态内容，dynamic content）返回给客户端（称为**服务动态内容**，serving dynamic content）。
+
+由 Web 服务器返回的内容都与它管理的某个文件关联，每个这样的文件都被一个唯一的 **URL**（Universal Resource Locator）标识。例如，以下 URL 标识 Internet 主机 `www.google.com` 上的 `/index.html` 文件，它受到监听端口为 $80$ 的 Web 服务器的管理。**端口号是可选的**，默认为知名的 HTTP 端口号 $80$。
+
+```md
+http://www.google.com:80/index.html
+```
+
+可执行文件的 URL 可以在文件名之后包含程序参数。`?` 分隔文件名和参数，`&` 分隔两个参数。例如，以下 URL 标识了可执行文件 `/cgi-bin/adder`，它会被以参数 `15000` 和 `213` 调用。
+
+```md
+http://bluefish.ics.cs.cmu.edu:8000/cgi-bin/adder?15000&213
+```
+
+事务过程中，客户端使用 URL 的前缀部分（如 `http://www.google.com:80`）来决定与什么服务器的什么端口建立连接。服务器通过 URL 的后缀部分（如 `/index.html`）来寻找它文件系统中的文件。
+
+**没有标准的规则来确定一个 URL 指向的是静态内容还是动态内容**。经典的方法是指定一组目录，所有可执行文件必须存放在这些目录中
+
+URL 后缀中开头的 `/` 不表示 Linux 根目录。它表示被请求内容类型的主目录。例如，可以将所有静态内容存放在 `/usr/httpd/html`，将所有动态内容存放在 `/usr/httpd/cgi-bin`。
+
+最小的 URL 后缀是 `/`，所有服务器将其扩展成某个默认的主页，例如 `/index.html`。当用户只输入了一个域名时，浏览器在 URL 后添加 `/`，然后发送请求，服务器又将 `/` 扩展到它默认的文件名
+
+### HTTP 事务
+
+HTTP 基于在 Internet 连接上传送的文本行，可以使用 Linux `telnet` 程序和 Internet 上的任何 Web 服务器交互。
+
+```bash
+telnet www.aol.com 80
+Trying 205.188.146.23...
+Connected to aol.com.
+Escape character is '^]'.
+GET / HTTP/1.0      
+Host: www.aol.com
+
+HTTP/1.0 200 OK
+MIME-Version: 1.0
+Date: Mon, 8 Jan 2010 4:59:42 GMT
+Server: Apache-Coyote/1.1
+Content-Type: text/html
+Content-Length: 42092
+
+<html>
+...
+</html>
+Connection closed by foreign host.
+```
+
+HTTP 标准要求每个文本行以 `\r\n` 结尾。每次输入一个文本行后，`telnet` 会读取该行，并在后面追加 `\r\n`，然后发送给服务器。
+
+#### HTTP 请求
+
+一个 HTTP **请求**（request）包括：
+
+- **请求行**（request line）：形如 `method URI version`
+- 零个或多个**请求报头**（request header）：形如 `header-name: header-data`
+- 空文本行，表示报头终止
+
+HTTP 支持多种**方法**（method），包括 $\text{GET}, \text{POST}, \text{OPTIONS}, \text{HEAD}, \text{PUT}, \text{DELETE}, \text{TRACE}$。其中 $\text{GET}$ 方法指导服务器生成并返回 URI（Uniform Resource Identifier）标识的内容。URI 是相应 URL 的后缀（对于浏览器如此，代理服务器请求内容时需要使用完整的 URL）。
+
+请求行中的 `version` 字段表明 HTTP 版本，最新版本为 HTTP/1.1。HTTP/1.1 定义了一些附加报头，支持缓冲、安全等高级特性，还允许客户端和服务器在同一条**持久连接**（persistent connection）上执行多个事务。两个版本互相兼容，HTTP/1.0 的客户端会简单忽略 HTTP/1.1 报头。
+
+上例中的请求行向服务器请求 `/`，即 `/index.html`。
+
+请求报头为服务器提供额外信息。`Host` 报头只在 HTTP/1.1 中是需要的。
+
+**代理缓存**（proxy cache）使用 `Host` 报头，它有时作为浏览器和管理被请求文件的**原始服务器**（origin server）的中介。客户端和原始服务器之间可以由多个代理，即**代理链**（proxy chain）。`Host` 报头中的数据指示了原始服务器的域名，代理可以利用它判断是否可以在本地缓存中拥有一个被请求内容的副本。
+
+#### HTTP 响应
+
+一个 HTTP **响应**（response）包括：
+
+- **响应行**（response line）：形如 `version status-code status-message`
+- 零个或多个**响应报头**（response header）：形如 `header-name: header-data`
+- 空文本行，表示报头终止
+- **响应主体**（response body）：响应的内容
+
+对于响应行，`version` 字段描述响应的 HTTP 版本。**状态码**（status-code）是一个 $3$ 位正整数，指明对请求的处理结果。**状态消息**（status message）给出状态码的描述。
+
+| 状态码 | 状态消息 | 描述 |
+| :---: | :---: | :--- |
+| 200 | OK | 请求成功 |
+| 301 | Moved Permanently | 内容已移动到 location 头中指明的主机 |
+| 400 | Bad Request | 错误请求 |
+| 403 | Forbidden | 服务器无权访问所请求的文件 |
+| 404 | Not Found | 服务器无法找到所请求的文件 |
+| 501 | Not Implemented | 服务器不支持所请求的方法 |
+| 505 | HTTP Version Not Supported | 服务器不支持请求的 HTTP 版本 |
+
+### 服务动态内容
+
+**CGI**（Common Gateway Interface，通用网关接口）定义了服务器提供动态内容的标准方法。
+
+#### 客户端将程序参数传递给服务器
+
+$\text{GET}$ 请求的参数在 URI 中传递。参数中不允许空格，空格用 `%20` 表示。其他特殊字符也有特殊的编码。
+
+> HTTP $\text{POST}$ 请求的参数在请求主体中传递，而不是 URI
+
+#### 服务器将参数传递给子进程
+
+服务器接收到如下的请求后：
+
+```bash
+GET /cgi-bin/adder?15000&213 HTTP/1.1
+```
+
+它调用 `fork` 创建子进程，将子进程中的 CGI 环境变量 $\text{QUERY\_STRING}$ 设置为 `15000&213`， 并调用 `execve` 加载程序。`adder` 可以在运行时用 Linux `getenv` 函数引用 $\text{QUERY\_STRING}$。
+
+`adder` 这类程序遵守 CGI 标准，常被称为 **CGI 程序**。很多 CGI 程序由 Perl 脚本编写，也常被称为 CGI 脚本。
+
+#### 服务器如何将其他信息传递给子进程
+
+CGI 定义了大量的环境变量。
+
+| 环境变量 | 描述 |
+| :---: | :--- |
+| $\text{QUERY\_STRING}$ | 程序参数 |
+| $\text{SERVER\_PORT}$ | 父进程监听的端口号 |
+| $\text{REQUEST\_METHOD}$ | 请求方法 |
+| $\text{REMOTE\_HOST}$ | 客户端域名 | 
+| $\text{REMOTE\_ADDR}$ | 客户端点分十进制 IP 地址 |
+| $\text{CONTENT\_TYPE}$ | 只对 $\text{POST}$ 有意义：请求体的 MIME 类型 |
+| $\text{CONTENT\_LENGTH}$ | 只对 $\text{POST}$ 有意义：请求体的字节长度 |
+
+#### 子进程将其输出发送到哪里
+
+CGI 程序将它的动态内容发送到标准输出。但在 CGI 程序被子进程加载并运行之前，标准输出会被**重定向到客户端的已连接描述符**。因此，CGI 程序的输出会被发送到客户端。
+
+父进程不知道子进程内容的类型和大小，子进程需要负责生成 `Content-type` 和 `Content-length` 响应报头，以及终止报头的空行。
+
+以下为一个 CGI 程序示例：
+
+```c
+#include "csapp.h"
+
+int main(void) {
+    char* buf;
+    char* p;
+    char arg1[MAXLINE], arg2[MAXLINE], content[MAXLINE];
+    int n1 = 0, n2 = 0;
+
+    /* Extract the two arguments */
+    if ((buf = getenv("QUERY_STRING")) != NULL) {
+        p = strchr(buf, '&');
+        *p = '\0';
+        strcpy(arg1, buf);
+        strcpy(arg2, p+1);
+        n1 = atoi(arg1);
+        n2 = atoi(arg2);
+    }
+
+    /* Make the response body */
+    sprintf(content, "QUERY_STRING=%s", buf);
+    sprintf(content, "Welcome to add.com: ");
+    sprintf(content, "%sTHE Internet addition portal.\r\n<p>", content);
+    sprintf(content, "%sThe answer is: %d + %d = %d\r\n<p>", content, n1, n2, n1+n2);
+    sprintf(content, "%sThanks for visiting!\r\n", content);
+
+    /* Generate the HTTP response */
+    printf("Connection: close\r\n");
+    printf("Content-length: %d\r\n", (int)strlen(content));
+    printf("Content-type: text/html\r\n\r\n");
+    printf("%s", content);
+    fflush(stdout);
+
+    exit(0);
+}
+```
+
+> 对于 $\text{POST}$ 请求，子进程也需要重定向标准输入到已连接描述符。之后，CGI 程序从标准输入读取请求体。
+
+## 综合：TINY Web 服务器
+
+```c
+/*
+ * tiny.c - A simple, iterative HTTP/1.0 Web server that uses the
+ *     GET method to serve static and dynamic content.
+ */
+#include "csapp.h"
+
+void doit(int fd);
+void read_requesthdrs(rio_t* rp);
+int parse_uri(char* uri, char* filename, char* cgiargs);
+void serve_static(int fd, char* filename, int filesize);
+void get_filetype(char* filename, char* filetype);
+void serve_dynamic(int fd, char* filename, char* cgiargs);
+void clienterror(int fd, char* cause, char* errnum, char* shortmsg,
+                 char* longmsg);
+
+void doit(int fd) {
+    int is_static;
+    struct stat sbuf;
+    char buf[MAXLINE], method[MAXLINE], uri[MAXLINE], version[MAXLINE];
+    char filename[MAXLINE], cgiargs[MAXLINE];
+    rio_t rio;
+
+    /* Read request line and headers */
+    Rio_readinitb(&rio, fd);
+    Rio_readlineb(&rio, buf, MAXLINE);    // read request line
+    printf("Request headers:\n");
+    printf("%s", buf);
+    sscanf(buf, "%s %s %s", method, uri, version);
+
+    if (strcasecmp(method, "GET")) {
+        clienterror(fd, method, "501", "Not Implemented",
+                    "Tiny does not implement this method");
+        return;
+    }
+    read_requesthdrs(&rio);
+
+    /* Parse URI from GET request */
+    is_static = parse_uri(uri, filename, cgiargs);
+    if (stat(filename, &sbuf) < 0) {
+        clienterror(fd, filename, "404", "Not found",
+                    "Tiny couldn't find this file");
+        return;
+    }
+
+    if (is_static) { /* Serve static content */
+        if (!(S_ISREG(sbuf.st_mode)) || !(S_IRUSR & sbuf.st_mode)) {
+            clienterror(fd, filename, "403", "Forbidden",
+                        "Tiny couldn't read the file");
+            return;
+        }
+        serve_static(fd, filename, sbuf.st_size);
+    } else { /* Serve dynamic content */
+        if (!(S_ISREG(sbuf.st_mode)) || !(S_IXUSR & sbuf.st_mode)) {
+            clienterror(fd, filename, "403", "Forbidden",
+                        "Tiny couldn't run the CGI program");
+            return;
+        }
+        serve_dynamic(fd, filename, cgiargs);
+    }
+}
+
+void read_requesthdrs(rio_t* rp) {
+    char buf[MAXLINE];
+
+    Rio_readlineb(rp, buf, MAXLINE);
+    while (strcmp(buf, "\r\n")) {    // if not empty line
+        Rio_readlineb(rp, buf, MAXLINE);
+        printf("%s", buf);
+    }
+}
+
+int parse_uri(char* uri, char* filename, char* cgiargs) {
+    char* ptr;
+
+    if (!strstr(uri, "cgi-bin")) { /* Static content */
+        // cgiargs = ""
+        // filename = ".{uri}"
+        // if uri ends with '/', then filename = ".{uri}home.html"
+        strcpy(cgiargs, "");
+        strcpy(filename, ".");
+        strcat(filename, uri);
+        if (uri[strlen(uri) - 1] == '/') strcat(filename, "home.html");
+        return 1;
+    } else { /* Dynamic content */
+        // uri = "{_filename}?{cgiargs}"
+        // filename = ".{_filename}"
+        ptr = index(uri, '?');
+        if (ptr) {
+            strcpy(cgiargs, ptr + 1);
+            *ptr = '\0';
+        } else
+            strcpy(cgiargs, "");
+        strcpy(filename, ".");
+        strcat(filename, uri);
+        return 0;
+    }
+}
+
+void serve_static(int fd, char* filename, int filesize) {
+    int srcfd;
+    char* srcp, filetype[MAXLINE], buf[MAXBUF];
+
+    /* Send response headers to client */
+    get_filetype(filename, filetype);
+    sprintf(buf, "HTTP/1.0 200 OK\r\n");
+    sprintf(buf, "%sServer: Tiny Web Server\r\n", buf);
+    sprintf(buf, "%sConnection: close\r\n", buf);
+    sprintf(buf, "%sContent-length: %d\r\n", buf, filesize);
+    sprintf(buf, "%sContent-type: %s\r\n\r\n", buf, filetype);
+    Rio_writen(fd, buf, strlen(buf));
+    printf("Response headers:\n");
+    printf("%s", buf);
+
+    /* Send response body to client */
+    srcfd = Open(filename, O_RDONLY, 0);
+    srcp = Mmap(0, filesize, PROT_READ, MAP_PRIVATE, srcfd, 0);
+    Close(srcfd);    // Don't forget!
+    Rio_writen(fd, srcp, filesize);
+    Munmap(srcp, filesize);
+}
+
+void get_filetype(char* filename, char* filetype) {
+    if (strstr(filename, ".html"))
+        strcpy(filetype, "text/html");
+    else if (strstr(filename, ".gif"))
+        strcpy(filetype, "image/gif");
+    else if (strstr(filename, ".png"))
+        strcpy(filetype, "image/png");
+    else if (strstr(filename, ".jpg"))
+        strcpy(filetype, "image/jpeg");
+    else
+        strcpy(filetype, "text/plain");
+}
+
+void serve_dynamic(int fd, char* filename, char* cgiargs) {
+    char buf[MAXLINE], *emptylist[] = {NULL};
+
+    /* Return first part of HTTP response */
+    sprintf(buf, "HTTP/1.0 200 OK\r\n");
+    Rio_writen(fd, buf, strlen(buf));
+    sprintf(buf, "Server: Tiny Web Server\r\n");
+    Rio_writen(fd, buf, strlen(buf));
+
+    if (Fork() == 0) { /* Child */
+        /* Real server would set all CGI vars here */
+        setenv("QUERY_STRING", cgiargs, 1);
+        Dup2(fd, STDOUT_FILENO); /* Redirect stdout to client */
+        Execve(filename, emptylist, environ); /* Run CGI program */
+    }
+    Wait(NULL); /* Parent waits for and reaps child */
+}
+
+void clienterror(int fd, char* cause, char* errnum, char* shortmsg,
+                 char* longmsg) {
+    char buf[MAXLINE], body[MAXBUF];
+
+    /* Build the HTTP response body */
+    sprintf(body, "<html><title>Tiny Error</title>");
+    sprintf(body,
+            "%s<body bgcolor="
+            "ffffff"
+            ">\r\n",
+            body);
+    sprintf(body, "%s%s: %s\r\n", body, errnum, shortmsg);
+    sprintf(body, "%s<p>%s: %s\r\n", body, longmsg, cause);
+    sprintf(body, "%s<hr><em>The Tiny Web server</em>\r\n", body);
+
+    /* Print the HTTP response */
+    sprintf(buf, "HTTP/1.0 %s %s\r\n", errnum, shortmsg);
+    Rio_writen(fd, buf, strlen(buf));
+    sprintf(buf, "Content-type: text/html\r\n");
+    Rio_writen(fd, buf, strlen(buf));
+    sprintf(buf, "Content-length: %d\r\n\r\n", (int)strlen(body));
+    Rio_writen(fd, buf, strlen(buf));
+    Rio_writen(fd, body, strlen(body));
+}
+
+int main(int argc, char** argv) {
+    int listenfd, connfd;
+    char hostname[MAXLINE], port[MAXLINE];
+    socklen_t clientlen;
+    struct sockaddr_storage clientaddr;
+
+    /* Check command line args */
+    if (argc != 2) {
+        fprintf(stderr, "usage: %s <port>\n", argv[0]);
+        exit(1);
+    }
+
+    listenfd = Open_listenfd(argv[1]);
+    while (1) {
+        clientlen = sizeof clientaddr;
+        connfd = Accept(listenfd, (SA*)&clientaddr, &clientlen);
+        Getnameinfo((SA*)&clientaddr, clientlen, hostname, MAXLINE, port,
+                    MAXLINE, 0);
+        printf("Accepted connection from (%s, %s)\n", hostname, port);
+        doit(connfd);
+        Close(connfd);
+    }
+}
+```
+
+TINY 只支持 $\text{GET}$ 方法。
+
+我们为所有输出都使用健壮的 `rio_writen` 函数。
+
+通过后缀判断文件类型并不靠谱。
+
+我们没有考虑 CGI 程序遇到错误的可能性。
+
+> 如果服务器写一个已经被客户端关闭了的连接，那么第一次写会正常返回，但第二次写就会导致 $\text{SIGPIPE}$ 信号。
+> $\text{SIGPIPE}$ 信号的默认行为是终止进程。如果捕获或忽略它，那么第二次写会返回 $-1$，并将 `errno` 设置为 $\text{EPIPE}$。`strerror` 和 `perror` 将 $\text{EPIPE}$ 解释为 `Broken pipe`。
+> 健壮的服务器必须捕获这些 $\text{SIGPIPE}$ 信号，并检查 `write` 调用是否产生错误。
+
+# 并发编程
+
+**并发**（concurrency）：逻辑控制流在时间上重叠。
+
+操作系统为使用应用级并发的程序提供了三种实现并发的机制：
+
+- **进程**。控制流需要使用**进程间通信**（InterProcess communication, IPC）机制来交换信息。
+- **I/O 多路复用**（I/O multiplexing）。应用程序在一个进程的上下文中显式地调度其逻辑流。逻辑流被模型化为状态机。
+- **线程**（thread）。线程是运行在单一进程上下文的逻辑流，由内核调度。
+
+我们使用迭代 echo 服务器为例，介绍这三种并发机制。
+
+## 基于进程的并发编程
+
