@@ -190,6 +190,37 @@
   - [综合：TINY Web 服务器](#综合tiny-web-服务器)
 - [并发编程](#并发编程)
   - [基于进程的并发编程](#基于进程的并发编程)
+    - [进程的优劣](#进程的优劣)
+  - [基于 I/O 多路复用的并发编程](#基于-io-多路复用的并发编程)
+  - [基于 I/O 多路复用的并发事件驱动服务器](#基于-io-多路复用的并发事件驱动服务器)
+    - [I/O 多路复用技术的优劣](#io-多路复用技术的优劣)
+  - [基于线程的并发编程](#基于线程的并发编程)
+    - [线程执行模型](#线程执行模型)
+    - [Posix 线程](#posix-线程)
+    - [创建线程](#创建线程)
+    - [终止线程](#终止线程)
+    - [回收已终止线程的资源](#回收已终止线程的资源)
+    - [分离线程](#分离线程)
+    - [初始化线程](#初始化线程)
+    - [基于线程的并发服务器](#基于线程的并发服务器)
+  - [多线程程序中的共享变量](#多线程程序中的共享变量)
+    - [线程内存模型](#线程内存模型)
+  - [用信号量同步线程](#用信号量同步线程)
+    - [进度图](#进度图)
+    - [信号量](#信号量)
+    - [使用信号量实现互斥](#使用信号量实现互斥)
+    - [利用信号量来调度共享资源](#利用信号量来调度共享资源)
+      - [生产者-消费者问题](#生产者-消费者问题)
+      - [读者-写者问题](#读者-写者问题)
+    - [综合：基于预线程化的并发服务器](#综合基于预线程化的并发服务器)
+  - [使用线程提高并行性](#使用线程提高并行性)
+    - [刻画并行程序的性能](#刻画并行程序的性能)
+  - [其他并发问题](#其他并发问题)
+    - [线程安全](#线程安全)
+    - [可重入性](#可重入性)
+    - [在线程化的程序中使用已存在的库函数](#在线程化的程序中使用已存在的库函数)
+    - [竞争](#竞争)
+    - [死锁](#死锁)
 
 # 链接
 
@@ -5479,4 +5510,1192 @@ TINY 只支持 $\text{GET}$ 方法。
 我们使用迭代 echo 服务器为例，介绍这三种并发机制。
 
 ## 基于进程的并发编程
+
+服务器每次通过 `accept` 接受某个客户端的连接请求后，派生一个子进程为该客户端服务。**子进程关闭它的监听描述符**，**父进程关闭它的已连接描述符**。
+
+```c
+#include "csapp.h"
+
+void echo(int connfd);
+
+void sigchld_handler(int sig) {
+    while (waitpid(-1, 0, WNOHANG) > 0)
+        ;
+    return;
+}
+
+int main(int argc, char** argv) {
+    int listenfd;
+    int connfd;
+    socklen_t clientlen;
+    struct sockaddr_storage clientaddr;
+
+    if (argc != 2) {
+        fprintf(stderr, "usage: %s <port>\n", argv[0]);
+        exit(0);
+    }
+
+    Signal(SIGCHLD, sigchld_handler);
+    listenfd = Open_listenfd(argv[1]);
+    while (1) {
+        clientlen = sizeof(struct sockaddr_storage);
+        connfd = Accept(listenfd, (SA*)&clientaddr, &clientlen);
+        if (Fork() == 0) {  /* Child */
+            Close(listenfd);  /* Child closes its listening socket */
+            echo(connfd);  /* Child services client */
+            Close(connfd);  /* Child closes connection with client */
+            exit(0);  /* Child exits */
+        }
+        Close(connfd);  /* Parent closes connected socket (important!) */
+    }
+}
+```
+
+### 进程的优劣
+
+父子进程**共享文件表**，但拥有独立的地址空间。一个进程不会不小心覆盖另一个进程的虚拟内存，这是一个明显的优点。
+
+但独立的地址空间使得进程之间共享状态信息变得困难，我们不得不使用开销较大的 IPC 机制。
+
+> Unix IPC 通常指所有允许进程和同一台主机的其他进程通信的技术，包括管道、FIFO、System V shared memory、System V semaphores。
+
+## 基于 I/O 多路复用的并发编程
+
+如果需要服务器在服务客户端的同时，也能对用户从标准输入键入的命令做出响应，就需要使用 I/O 多路复用技术。
+
+```c
+#include <sys/select.h>
+
+// 返回：若成功则为描述符数目，若出错则为 -1
+int select(int n, fd_set* fdset, NULL, NULL, NULL);
+```
+
+参数 `fdset` 指定了**描述符集合**。逻辑地，描述符集合被看作一个大小为 `n` 的位向量，每一位 $b_k$ 指示描述符 $k$ 是否在集合中。
+
+`n` 指明描述符集合的最大基数，此处即 `fd_set` 的基数。
+
+`select` 函数阻塞，直到**读集合**（read set） `fdset` 中的某个描述符准备好开始读时（即当从该描述符读取一个字节的请求不会阻塞时）。
+
+`select` 将 `fdset` 修改为**准备好集合**（ready set），它包括已准备好的描述符。`select` 函数的返回值是准备好的描述符的数目。我们需要在每次调用 `select` 时都更新读集合。
+
+我们定义由监听描述符和标准输入组成的读集合，然后调用 `select`。如果监听描述符准备好了，我们就调用 `accept` 接受连接请求。如果标准输入准备好了，我们就调用 `command` 处理命令。
+
+```c
+#include "csapp.h"
+
+void echo(int connfd);
+void command(void);
+
+int main(int argc, char** argv) {
+    int listenfd;
+    int connfd;
+    socklen_t clientlen;
+    struct sockaddr_storage clientaddr;
+    fd_set read_set, ready_set;
+
+    if (argc != 2) {
+        fprintf(stderr, "usage: %s <port>\n", argv[0]);
+        exit(0);
+    }
+
+    listenfd = Open_listenfd(argv[1]);
+
+    FD_ZERO(&read_set);  /* Clear read set */
+    FD_SET(STDIN_FILENO, &read_set);  /* Add stdin to read set */
+    FD_SET(listenfd, &read_set);  /* Add listenfd to read set */
+
+    while (1) {
+        ready_set = read_set;
+        Select(listenfd + 1, &ready_set, NULL, NULL, NULL);
+        if (FD_ISSET(STDIN_FILENO, &ready_set))
+            command();
+        if (FD_ISSET(listenfd, &ready_set)) {
+            clientlen = sizeof(struct sockaddr_storage);
+            connfd = Accept(listenfd, (SA*)&clientaddr, &clientlen);
+            echo(connfd);
+            Close(connfd);
+        }
+    }
+}
+
+void command(void) {
+    char buf[MAXLINE];
+    if (!Fgets(buf, MAXLINE, stdin))
+        exit(0);  /* EOF */
+    printf("%s", buf);  /* Process the input command */
+}
+```
+
+以上服务器的一个缺点是，它一旦连接到某客户端，就会一直为该客户端服务，直到客户端关闭连接。此过程中，它不会响应从标准输入键入的命令。
+
+可以使用更细粒度的多路复用，服务器每次循环至多只回送一个文本行。
+
+> 程序阻塞在 `select` 时，如果在标准输入键入 `Ctrl+D`（表示 EOF），也会导致 `select` 返回，此时准备好集合包含标准输入。
+
+## 基于 I/O 多路复用的并发事件驱动服务器
+
+在**事件驱动**（event-driven）程序中，事件导致流向前推进。逻辑流被模型化为状态机（state machine），包括一组状态（state）、输入事件（input event）和转移（transition）。
+
+对于每个新客户端 $k$，并发服务器创建状态机 $s_k$，将它和已连接描述符 $d_k$ 绑定。状态机 $s_k$ 的初始状态是“等待 $d_k$ 准备好读”，它的输入事件是“$d_k$ 已准备好读”，转移是“从 $d_k$ 读取一个文本行”。
+
+以下示例中，`select` 函数检测输入事件，`add_client` 函数创建新的逻辑流（状态机），`check_clients` 回送文本行，执行状态转移，并负责删除状态机。
+
+```c
+#include "csapp.h"
+
+/* A pool of connected descriptors */
+typedef struct {    
+    int maxfd;  /* Largest descriptor in read_set */
+    fd_set read_set;  /* Set of all active descriptors */
+    fd_set ready_set;  /* Subset of descriptors ready for reading */
+    int nready;  /* Number of ready descriptors from select */
+    int maxi;  /* Highwater index into client array */
+    int clientfd[FD_SETSIZE];  /* Set of active descriptors */
+    rio_t clientrio[FD_SETSIZE];  /* Set of active read buffers */
+} pool;
+
+int byte_cnt = 0;  /* Counts total bytes received by server */
+
+void init_pool(int listenfd, pool* p) {
+    /* Initially, there are no connected descriptors */
+    int i;
+    p->maxi = -1;
+    for (i = 0; i < FD_SETSIZE; i++)
+        p->clientfd[i] = -1;
+
+    /* Initially, listenfd is only member of select read set */
+    p->maxfd = listenfd;
+    FD_ZERO(&p->read_set);
+    FD_SET(listenfd, &p->read_set);
+}
+
+void add_client(int connfd, pool* p) {
+    int i;
+    p->nready--;
+    for (i = 0; i < FD_SETSIZE; i++)  /* Find an available slot */
+        if (p->clientfd[i] < 0) {
+            /* Add connected descriptor to the pool */
+            p->clientfd[i] = connfd;
+            Rio_readinitb(&p->clientrio[i], connfd);
+
+            /* Add the descriptor to descriptor set */
+            FD_SET(connfd, &p->read_set);
+
+            /* Update max descriptor and pool highwater mark */
+            if (connfd > p->maxfd) p->maxfd = connfd;
+            if (i > p->maxi) p->maxi = i;
+            break;
+        }
+    if (i == FD_SETSIZE)  /* Couldn't find an empty slot */
+        app_error("add_client error: Too many clients");
+}
+
+void check_clients(pool* p) {
+    int i, connfd, n;
+    char buf[MAXLINE];
+    rio_t rio;
+
+    for (i = 0; (i <= p->maxi) && (p->nready > 0); i++) {
+        connfd = p->clientfd[i];
+        rio = p->clientrio[i];
+
+        /* If the descriptor is ready, echo a text line from it */
+        if ((connfd > 0) && (FD_ISSET(connfd, &p->ready_set))) {
+            p->nready--;
+            if ((n = Rio_readlineb(&rio, buf, MAXLINE)) != 0) {
+                byte_cnt += n;
+                printf("Server received %d (%d total) bytes on fd %d\n",
+                       n, byte_cnt, connfd);
+                Rio_writen(connfd, buf, n);
+            } else {  /* EOF detected, remove descriptor from pool */
+                Close(connfd);
+                FD_CLR(connfd, &p->read_set);
+                p->clientfd[i] = -1;
+            }
+        }
+    }
+}
+
+int main(int argc, char** argv) {
+    int listenfd, connfd;
+    socklen_t clientlen;
+    struct sockaddr_storage clientaddr;
+    static pool pool;
+
+    if (argc != 2) {
+        fprintf(stderr, "usage: %s <port>\n", argv[0]);
+        exit(0);
+    }
+
+    listenfd = Open_listenfd(argv[1]);
+    init_pool(listenfd, &pool);
+
+    while (1) {
+        /* Wait for listening/connected descriptor(s) to become ready */
+        pool.ready_set = pool.read_set;
+        pool.nready = Select(pool.maxfd + 1, &pool.ready_set, NULL, NULL, NULL);
+
+        /* If listening descriptor ready, add new client to pool */
+        if (FD_ISSET(listenfd, &pool.ready_set)) {
+            clientlen = sizeof(struct sockaddr_storage);
+            connfd = Accept(listenfd, (SA*)&clientaddr, &clientlen);
+            add_client(connfd, &pool);
+        }
+
+        /* Echo a text line from each ready connected descriptor */
+        check_clients(&pool);
+    }
+}
+```
+
+> 现代高性能服务器（Node.js、nginx 和 Tornado）都基于 I/O 多路复用的事件驱动的编程方式。这相比于进程和线程具有更好的性能。
+
+### I/O 多路复用技术的优劣
+
+基于 I/O 多路复用的事件驱动设计更加**灵活**，例如，可以为某些客户端提供特定的服务，为其他客户端提供其他的服务。这在基于进程的并发编程中是很困难的。
+
+另一方面，基于 I/O 多路复用的事件驱动服务器运行在单一进程上下文中，每个逻辑流处于同样的地址空间，流之间共享数据很容易。可以用 gdb 等工具调试服务器。
+
+但事件驱动设计的编码较为复杂，随着并发粒度的减小，复杂性还会上升。在故意只发送部分文本行然后就停止的恶意客户端攻击面前，服务器很脆弱。
+
+事件驱动设计也不能充分地利用多核处理器的性能。
+
+## 基于线程的并发编程
+
+**线程**（thread）就是运行在进程上下文中的逻辑流，由内核自动调度。
+
+每个线程有自己的**线程上下文**（thread context），包括线程 ID（Thread ID，**TID**）、栈、栈指针、程序计数器、通用目的寄存器和条件码。
+
+所有运行在同一个进程内的线程共享此进程的虚拟地址空间。
+
+### 线程执行模型
+
+每个进程开始其生命周期时都只有一个线程，称为**主线程**（main thread）。主线程可以创建一个**对等线程**（peer thread），此后，两个线程并发地运行。它们之间的调度由内核控制。
+
+线程的上下文比进程小得多，因此线程上下文切换更快。
+
+线程之间也不是按照严格的父子层次组织的，和某个线程相关的线程被组织成一个对等**池**（pool），独立于其他线程创建的线程。主线程和其他线程的区别仅在于它总是进程中首个运行的线程。
+
+一个线程可以杀死它的任何对等线程，或等待它的任何对等线程终止。
+
+每个对等线程可以读写相同的共享数据。
+
+### Posix 线程
+
+Posix 线程（Pthreads）是在 C 中处理线程的一个标准接口。Pthreads 定义了大约 $60$ 个函数，包括创建、杀死、回收线程，与对等线程安全地共享数据，通知对等线程系统状态变化等。
+
+主线程通过 `Pthread_create` 创建一个对等线程，并为它指定例程。
+
+主线程调用 `Pthread_join` 等待对等线程终止。
+
+最后，主线程调用 `exit`，终止了当前进程中的所有线程（此例中，只有主线程）。
+
+线程的代码和本地数据被封装在一个**线程例程**（thread routine）中，它的类型应当是 `void*(void*)`。
+
+
+```c
+#include "csapp.h"
+
+void* thread(void* vargp);
+
+int main(int argc, char** argv) {
+    pthread_t tid;
+    Pthread_create(&tid, NULL, thread, NULL);
+    Pthread_join(tid, NULL);
+    exit(0);
+}
+
+void* thread(void* vargp) {
+    printf("Hello, world!\n");
+    return NULL;
+}
+```
+
+### 创建线程
+
+`pthread_create` 创建一个新线程，在新线程的上下文中以 `arg` 参数运行线程例程 `f`。
+
+```c
+#include <pthread.h>
+
+typedef void* (func)(void*);
+
+// 返回：若成功则为 0，若出错则非零
+int pthread_create(pthread_t* tid, pthread_attr_t* attr,
+                   func* f, void* argp);
+```
+
+`attr` 参数可以指定新线程的默认属性。我们不作讨论，总置为 `NULL`。
+
+`tid` 参数存放新线程的 TID。
+
+新线程可以调用 `pthread_self` 获得它的 TID。
+
+```c
+#include <pthread.h>
+
+// 返回：调用线程的 TID
+pthread_t pthread_self(void);
+```
+
+### 终止线程
+
+当顶层的线程例程返回时，线程会**隐式地终止**
+
+通过调用 `pthread_exit`，线程可以**显式地终止**。如果主线程调用 `pthread_exit`，它会等待所有对等线程终止，然后再终止主线程和整个进程。
+
+可选参数 `thread_return` 指定了线程例程的返回值。
+
+```c
+#include <pthread.h>
+
+// 无返回值
+void pthread_exit(void* thread_return);
+```
+
+某个对等线程调用 Linux `exit` 函数时，进程以及进程中的所有线程都会终止。
+
+线程可以以它对等线程的 TID 作为参数调用 `pthread_cancel` 函数，终止这个对等线程。
+
+### 回收已终止线程的资源
+
+线程调用 `pthread_join` 等待其他线程终止
+
+```c
+#include <pthread.h>
+
+// 返回：若成功则为 0，若出错则非零
+int pthread_join(pthread_t tid, void** thread_return);
+```
+
+`pthread_join` 会阻塞，直到线程 `tid` 终止。线程例程的返回值被存放在 `*thread_return` 中。此后，线程 `tid` 的资源被回收。
+
+`pthread_join` 只能等待某个指定线程终止，这是一个设计缺陷。
+
+### 分离线程
+
+线程要么是**可结合的**（joinable），要么是**分离的**（detached）。
+
+可结合的线程可以被其他线程回收和杀死，在被回收之前，它的内存资源（例如栈）不会释放。分离的线程不能被其他线程回收或杀死，它的内存资源在终止后由系统自动释放。
+
+线程默认是可结合的，可以通过调用 `pthread_detach` 将可结合线程设置为分离的。
+
+```c
+#include <pthread.h>
+
+// 返回：若成功则为 0，若出错则非零
+int pthread_detach(pthread_t tid);
+```
+
+高性能 Web 服务器可能在每次收到 Web 浏览器的连接请求时都创建一个新的对等线程，服务器不会愿意显式地等待每个对等线程终止，因此每个对等线程都应该分离它自身。
+
+### 初始化线程
+
+线程例程的初始化由 `pthread_once` 函数完成，它保证参数函数 `init_routine` 只被调用一次。
+
+```c
+#include <pthread.h>
+
+pthread_once_t once_control = PTHREAD_ONCE_INIT;
+
+// 返回：总是 0
+int pthread_once(pthread_once_t* once_control, void (*init_routine)(void));
+```
+
+`once_control` 变量是一个全局或静态变量，总是被初始化为 $\text{PTHREAD\_ONCE\_INIT}$。
+
+第一次用 `once_control` 调用 `pthread_once` 时，它调用 `init_routine`。之后用 `once_control` 对 `pthread_once` 的调用将不再调用 `init_routine`。
+
+这可以用于动态初始化多个线程共享的全局变量。
+
+### 基于线程的并发服务器
+
+```c
+#include "csapp.h"
+
+void echo(int connfd);
+void* thread(void* vargp);
+
+int main(int argc, char** argv) {
+    int listenfd;
+    int* connfdp;
+    socklen_t clientlen;
+    struct sockaddr_storage clientaddr;
+    pthread_t tid;
+
+    if (argc != 2) {
+        fprintf(stderr, "usage: %s <port>\n", argv[0]);
+        exit(0);
+    }
+
+    listenfd = Open_listenfd(argv[1]);
+    while (1) {
+        clientlen = sizeof(struct sockaddr_storage);
+        connfdp = Malloc(sizeof(int));
+        *connfdp = Accept(listenfd, (SA*)&clientaddr, &clientlen);
+        Pthread_create(&tid, NULL, thread, connfdp);
+    }
+}
+
+void* thread(void* vargp) {
+    int connfd = *((int*)vargp);
+    Pthread_detach(pthread_self());
+    Free(vargp);
+    echo(connfd);
+    Close(connfd);
+    return NULL;
+}
+```
+
+如果以以下方式将 `connfd` 传递给对等线程：
+
+```c
+int main(int argc, char** argv) {
+    // ...
+    while (1) {
+        // ...
+        connfd = Accept(listenfd, (SA*)&clientaddr, &clientlen);
+        Pthread_create(&tid, NULL, thread, &connfd);
+    }
+}
+
+void* thread(void* vargp) {
+    int connfd = *((int*)vargp);
+    // ...
+}
+```
+
+就会**引入竞争**！
+
+对等线程的**例程中的赋值语句**和**主线程下一次循环的 `Accept` 调用**之间存在竞争。如果赋值语句先于下一次 `Accept`，那么程序行为是正确的。否则，赋值语句将会把已经被下一次 `Accept` 调用更新了的已连接描述符赋值给 `connfd`，导致对等线程得到错误的描述符。
+
+因此，上例中我们在每次循环中，都为局部变量 `connfd` 分配一块新内存。
+
+另一方面，服务器必须小心地避免内存泄漏。例程需要将自己分离，并释放参数 `vargp` 指向的内存。
+
+## 多线程程序中的共享变量
+
+变量是**共享的**（shared），如果它可以被一个以上的线程访问。静态存储期的变量可以被共享，自动存储期的变量（栈上局部变量）也可以被共享。
+
+我们使用以下示例介绍多线程程序中的共享变量。
+
+```c
+#include "csapp.h"
+
+#define N 2
+
+void* thread(void* vargp);
+
+char** ptr;  /* Global variable */
+
+int main(int argc, char** argv) {
+    int i;
+    pthread_t tid;
+    char* msgs[N] = {
+        "Hello from foo",
+        "Hello from bar"
+    };
+
+    ptr = msgs;
+    for (i = 0; i < N; i++)
+        Pthread_create(&tid, NULL, thread, (void*)i);
+    Pthread_exit(NULL);
+}
+
+void* thread(void* vargp) {
+    int myid = (int)vargp;
+    static int cnt = 0;
+    printf("[%d]: %s (cnt=%d)\n", myid, ptr[myid], ++cnt);
+    return NULL;
+}
+```
+
+### 线程内存模型
+
+一组并发线程运行在一个进程的上下文中，每个线程有独立的线程上下文，包括 **TID、栈、栈指针、程序计数器、通用目的寄存器、条件码**。
+
+每个线程和其他线程共享此进程上下文的剩余部分，包括整个用户虚拟地址空间：只读的代码、可读写的数据、堆以及所有的共享库的代码和数据区域。线程也共享相同的打开文件的集合。
+
+任何线程都可以访问共享虚拟内存的任意位置。
+
+**线程的栈之间是不设防的**，如果一个线程以某种方式得到了另一个线程的栈的内存地址，那么它就可以读写这个栈的任意位置。例如示例程序中对等线程可以直接通过 `ptr` 读主线程栈中的内容。
+
+## 用信号量同步线程
+
+以下程序展示了**同步错误**（synchronization error）
+
+```c
+// This code is buggy
+#include "csapp.h"
+
+void* thread(void* vargp);
+
+volatile long cnt = 0;  /* Counter */
+
+int main(int argc, char** argv) {
+    long niters;
+    pthread_t tid1, tid2;
+
+    if (argc != 2) {
+        fprintf(stderr, "usage: %s <niters>\n", argv[0]);
+        exit(0);
+    }
+    niters = atoi(argv[1]);
+
+    Pthread_create(&tid1, NULL, thread, &niters);
+    Pthread_create(&tid2, NULL, thread, &niters);
+    Pthread_join(tid1, NULL);
+    Pthread_join(tid2, NULL);
+
+    if (cnt != (2 * niters))
+        printf("BOOM! cnt=%ld\n", cnt);
+    else
+        printf("OK cnt=%ld\n", cnt);
+    exit(0);
+}
+
+void* thread(void* vargp) {
+    long i;
+    long niters = *((long*)vargp);
+
+    for (i = 0; i < niters; i++)
+        cnt++;
+
+    return NULL;
+}
+```
+
+实际运行时，`cnt` 的值却不是 $2 \times \text{niters}$，这是因为 `cnt++` 不是原子操作。
+
+我们将线程 $i$ 的循环代码分解成五部分：$H_i, L_i, U_i, S_i, T_i$。
+
+
+```c
+for (i = 0; i < niters; i++)
+    cnt++;
+
+// x86-64 asm
+movq    (%rdi), %rcx       // H_i: Head (load niters)
+testq   %rcx, %rcx
+jle      .L2
+movl    $0, %eax
+.L3:
+movq    cnt(%rip), %rdx    // L_i: Load cnt
+addq    %eax               // U_i: Update cnt
+movq    %eax, cnt(%rip)    // S_i: Store cnt
+addq    $1, %rax           // T_i: Tail
+cmpq    %rcx, %rax
+jne     .L3
+```
+
+**一般而言，无法预测操作系统执行线程指令的顺序是否正确**。例如，下图 $(a)$ 指示的顺序会产生正确的结果，而 $(b)$ 指示的顺序中，由于 $L_2$ 在 $S_1$ 之前被执行，两个线程最终存储的值都是 $1$。
+
+![](images/12-18-不正确的顺序.png)
+
+### 进度图
+
+**进度图**（progress graph）将 $n$ 个并发线程的执行模型化为一条 $n$ 维笛卡尔空间中的轨迹线。
+
+进度图的每条坐标轴 $k$ 对应于线程 $k$ 的进度，每个点 $(I_1, \cdots, I_n)$ 代表状态：线程 $k$ 已经完成了指令 $I_k$。
+
+**转换**（transition）是从一个点到另一个相邻点的有向边，它只能是向右或者向上的。
+
+![](images/12-20-示例轨迹线.png)
+
+对于线程 $i$，指令 $(L_i, U_i, S_i)$ 构成了一个关于 `cnt` 的**临界区**（critival section），它不应该和其他进程的临界区交替执行。我们需要确保每个线程在执行其临界区中的指令时，拥有对共享变量**互斥的访问**（mutually exclusive access）。这种现象称为**互斥**（mutual exclusion）。
+
+进度图中，两个临界区的交集形成的状态空间区域称为**不安全区**（unsafe region）。
+
+绕开不安全去或沿不安全区边界线的轨迹线是**安全的**，穿过不安全区的轨迹线是**不安全的**。
+
+![](images/12-21-安全和不安全轨迹线.png)
+
+### 信号量
+
+**信号量**（semaphore）是一种非负整数类型的全局变量，只能由两种特殊的操作来处理：
+
+- $P(s)$：
+  - 如果 $s$ 非零，则将 $s$ 减 $1$，返回
+  - 如果 $s$ 为零，则挂起此线程，直到 $s$ 变为非零后一个 $V$ 操作重启此线程，重启后，$P$ 将 $s$ 减 $1$，返回
+- $V(s)$：
+  - 将 $s$ 加 $1$。如果有线程因为 $s$ 为零而被 $P$ 操作挂起，则重启**其中的一个**
+
+$P$ 的测试和减法操作整体是原子的，$S$ 的加法操作（加载、加法、存储）也是原子的。
+
+有多个线程等待同一个信号量时，$V$ 操作**选择重启的线程是任意的**。
+
+$P$ 和 $V$ 保证了正确初始化的**信号量永远不会是负值**，称为**信号量不变式**（semaphore invariant）。
+
+> $P$ 来自于荷兰语的 Proberen，意为测试
+> $V$ 来自于荷兰语的 Verhogen，意为增加
+
+Posix 标准定义了操作信号量的函数：
+
+```c
+#include <semephore.h>
+
+// 返回：若成功则为 0，若出错则为 -1
+int sem_init(sem_t* sem, 0, unsigned int value);
+int sem_wait(sem_t* s);    // P(s)
+int sem_post(sem_t* s);    // V(s)
+```
+
+`sem_init` 将信号量 `sem` 初始化为 `value`。中间的参数我们总置零。
+
+`sem_wait` 和 `sem_post` 分别对应 $P$ 和 $V$ 操作，我们定义它们的 wrapper function：
+
+```c
+#include "csapp.h"
+
+// 返回：无返回值
+void P(sem_t* sem);
+void V(sem_t* sem);
+```
+
+### 使用信号量实现互斥
+
+将每个共享变量（每组共享变量）与一个初始为 $1$ 的信号量 $s$ 关联起来，然后用 $P$ 和 $V$ 操作将相应的临界区包围起来
+
+这种信号量称为**二元信号量**（binary semaphore），因为它的值只能是 $0$ 或 $1$。以提供互斥为目的的二元信号量也称为**互斥锁**（mutex）。
+
+在互斥锁上执行 $P$ 操作称为对互斥锁**加锁**，执行 $V$ 操作称为对互斥锁**解锁**。称对互斥锁加了锁但还没有解锁的线程**占用**这个互斥锁。一个被用作一组可用资源的计数器的信号量称为**计数信号量**。信号量 $s<0$ 的不可行状态定义了一个**禁止区**，它覆盖了不安全区。 
+
+![](images/12-22-信号量互斥锁.png)
+
+在 $L$ 操作前，执行 $P$ 操作；在 $S$ 操作后，执行 $S$ 操作。某个线程读写共享资源时，信号量为 $0$。多个线程同时读写共享资源的状态对应的信号量为负值，因此不可能进入。
+
+示例：
+
+```c
+volatile long cnt = 0;
+sem_t mutex;
+
+int main(int argc, char** argv) {
+    Sem_init(&mutex, 0, 1);
+}
+
+void* thread(void* vargp) {
+    long i, niters = *((long*)vargp);
+
+    for (i = 0; i < niters; i++) {
+        P(&mutex);
+        cnt++;
+        V(&mutex);
+    }
+
+    return NULL;
+}
+```
+
+> 进度图有局限性。多处理器系统中，一组 CPU / 高速缓存对共享同一个主存，这是进度图不能描述的
+
+### 利用信号量来调度共享资源
+
+#### 生产者-消费者问题
+
+生产者和消费者共享一个有 $n$ 个**槽**的**有限缓冲区**。生产者线程不断生成新的**项目**（item），并将它们插入缓冲区。消费者线程不断从缓冲区取出并使用项目。
+
+插入和取出项目都涉及更新共享变量，因此必须保证互斥。
+
+如果缓冲区已满，生产者必须等待空槽出现；如果缓冲区为空，消费者必须等待新项目被插入。
+
+我们开发一个简单 $\text{SBUF}$ 包，用于构造生产者-消费者程序。
+
+```c
+#include "csapp.h"
+#include "sbuf.h"
+
+typedef struct {
+    int* buf;       /* Buffer array */
+    int n;          /* Maximum number of slots */
+    int front;      /* buf[(front + 1) % n] is first item */
+    int rear;       /* buf[rear % n] is last item */
+    sem_t mutex;    /* Protects accesses to buf */
+    sem_t slots;    /* Counts available slots */
+    sem_t items;    /* Counts available items */
+} sbuf_t;
+
+/* Create an empty, bounded, shared FIFO buffer with n slots */
+void sbuf_init(sbuf_t* sp, int n) {
+    sp->buf = Calloc(n, sizeof(int));
+    sp->n = n;                  /* Buffer holds max of n items */
+    sp->front = sp->rear = 0;   /* Empty buffer iff front == rear */
+    Sem_init(&sp->mutex, 0, 1); /* Binary semaphore for locking */
+    Sem_init(&sp->slots, 0, n); /* Initially, buf has n empty slots */
+    Sem_init(&sp->items, 0, 0); /* Initially, buf has 0 items */
+}
+
+/* Clean up buffer sp */
+void sbuf_deinit(sbuf_t* sp) {
+    Free(sp->buf);
+}
+
+/* Insert item onto the rear of shared buffer sp */
+void sbuf_insert(sbuf_t* sp, int item) {
+    P(&sp->slots);              /* Wait for available slot */
+    P(&sp->mutex);              /* Lock the buffer */
+    sp->buf[(++sp->rear) % (sp->n)] = item; /* Insert the item */
+    V(&sp->mutex);              /* Unlock the buffer */
+    V(&sp->items);              /* Announce available item */
+}
+
+/* Remove and return the first item from buffer sp */
+int sbuf_remove(sbuf_t* sp) {
+    int item;
+    P(&sp->items);              /* Wait for available item */
+    P(&sp->mutex);              /* Lock the buffer */
+    item = sp->buf[(++sp->front) % (sp->n)]; /* Remove the item */
+    V(&sp->mutex);              /* Unlock the buffer */
+    V(&sp->slots);              /* Announce available slot */
+    return item;
+}
+```
+
+#### 读者-写者问题
+
+一组线程访问一个共享对象，有的线程只读对象（称为**读者**），有的线程修改对象（称为**写者**）。写者必须拥有对对象独占的访问，而读者可以和无限多个其他读者共享对象。
+
+第一类读者-写者问题：**读者优先**，除非已经将适用对象的权限赋予了一个写者。读者不会因为有一个写者在等待而等待。
+
+以下是对第一类读者-写者问题的解答。
+
+`mutex` 保护对 `readcnt` 的访问，它统计当前在临界区中的读者数量。第一个进入临界区的读者对 `w` 加锁，阻止写者进入临界区。最后一个离开临界区的读者对 `w` 解锁，允许写者进入临界区。除了第一个读者和最后一个读者，其他读者不会对 `w` 加锁或解锁。因此，只要有读者在临界区中，写者就不能进入临界区。
+
+写者通过 `w` 保护对共享变量的访问，保证同时只有一个写者在临界区中。
+
+```c
+/* Solution to the first readers-writers problem */
+
+/* Global variables */
+int readcnt;        /* Initially = 0 */
+sem_t mutex, w;     /* Both initially = 1 */
+
+void reader(void) {
+    while (1) {
+        P(&mutex);
+        readcnt++;
+        if (readcnt == 1)    /* First in */
+            P(&w);
+        V(&mutex);
+
+        /* Critical section */
+        /* Reading happens */
+
+        P(&mutex);
+        readcnt--;
+        if (readcnt == 0)
+            V(&w);
+        V(&mutex);
+    }
+}
+
+void writer(void) {
+    while (1) {
+        P(&w);
+
+        /* Critical section */
+        /* Writing happens */
+
+        V(&w);
+    }
+}
+```
+
+第二类读者-写者问题：**写者优先**，一旦有写者准备好写，它就会优先使写者完成写操作。在写者后到达的读者必须等待，即便这个写者也在等待。
+
+对这两种读者-写者问题的正确解答可能造成**饥饿**（starvation），即某个线程被无限期地阻塞。例如，第一类读者-写者问题中，如果有读者不断地到达，写者就可能饥饿。
+
+> 信号量是简单、经典的同步线程的方法，但不是唯一的。
+> Java 线程通过 Java Monitor 机制同步，它提供了对信号量互斥和调度能力更高级别的抽象。不过，它可以用信号量实现。
+
+### 综合：基于预线程化的并发服务器
+
+之前的示例中，我们为每个新客户端创建一个新线程，这代价较大。
+
+基于**预线程化**（prethreading）技术的服务器通过生产者-消费者模型降低这一开销。服务器由一个主线程和一组工作者线程组成，主线程不断地接受客户端的连接请求，并将得到的已连接描述符放在一个有限缓冲区内。工作者线程反复从这个共享的缓冲区内取出已连接描述符，为客户端提供服务。
+
+```c
+#include "csapp.h"
+#include "sbuf.h"
+
+#define NTHREADS 4
+#define SBUFSIZE 16
+
+void echo_cnt(int connfd);
+void* thread(void* vargp);
+
+sbuf_t sbuf;    /* Shared buffer of connected descriptors */
+
+int main(int argc, char** argv) {
+    int i; 
+    int listenfd, connfd;
+    socklen_t clientlen;
+    struct sockaddr_storage clientaddr;
+    pthread_t tid;
+
+    if (argc != 2) {
+        fprintf(stderr, "usage: %s <port>\n", argv[0]);
+        exit(0);
+    }
+
+    listenfd = Open_listenfd(argv[1]);
+
+    sbuf_init(&sbuf, SBUFSIZE);
+    for (i = 0; i < NTHREADS; i++)
+        Pthread_create(&tid, NULL, thread, NULL);
+
+    while (1) {
+        clientlen = sizeof(struct sockaddr_storage);
+        connfd = Accept(listenfd, (SA*)&clientaddr, &clientlen);
+        sbuf_insert(&sbuf, connfd);
+    }
+}
+
+void* thread(void* vargp) {
+    Pthread_detach(pthread_self());
+    while (1) {
+        int connfd = sbuf_remove(&sbuf);
+        echo_cnt(connfd);
+        Close(connfd);
+    }
+}
+```
+
+在开发 $\text{SBUF}$ 和 $\text{RIO}$ 包时，我们要求主程序显式调用初始化函数以完成初始化。而这里对于 `byte_cnt` 和 `mutex` 的初始化，我们则利用了 `pthread_once` 函数。
+
+这样做的好处是使得程序包使用更加方便，代价是增加了很多对 `pthread_once` 的无效调用。
+
+```c
+#include "csapp.h"
+
+static int byte_cnt;   /* Byte counter */
+static sem_t mutex;    /* and the mutex that protects it */
+
+static void init_echo_cnt(void) {
+    Sem_init(&mutex, 0, 1);
+    byte_cnt = 0;
+}
+
+void echo_cnt(int connfd) {
+    int n;
+    char buf[MAXLINE];
+    rio_t rio;
+    static pthread_once_t once = PTHREAD_ONCE_INIT;
+
+    Pthread_once(&once, init_echo_cnt);
+    Rio_readinitb(&rio, connfd);
+    while ((n = Rio_readlineb(&rio, buf, MAXLINE)) != 0) {
+        P(&mutex);
+        byte_cnt += n;
+        printf("server received %d (%d total) bytes on fd %d\n",
+               n, byte_cnt, connfd);
+        V(&mutex);
+        Rio_writen(connfd, buf, n);
+    }
+}
+```
+
+> I/O 多路复用不是编写事件驱动程序的唯一方法。这个基于预线程化的服务器实际上也是一个事件驱动服务器。
+
+## 使用线程提高并行性
+
+**并行**（parallel）程序是在同一时刻有多条逻辑流在运行的程序，它是并发程序的真子集，可以更好地利用多核处理器的性能。
+
+作为示例，我们讨论如何并行地计算前 $n$ 个自然数的和。
+
+我们将序列划分成 $t$ 个不相交的段，分配给 $t$ 个线程计算（假设 $n$ 是 $t$ 的倍数）。我们将新创建线程的 TID 作为参数传递给线程例程，线程例程通过其 TID 确定自己负责的段。最后，主程序验证计算结果的正确性。
+
+```c
+#include "csapp.h"
+
+#define MAXTHREADS 32
+
+void* sum_mutex(void* vargp);
+
+long gsum = 0;          /* Global sum */
+long nelems_per_thread; /* Number of elements to sum */
+sem_t mutex;            /* Mutex to protect global sum */
+
+int main(int argc, char** argv) {
+    long i, nelems, log_nelems, nthreads, myid[MAXTHREADS];
+    pthread_t tid[MAXTHREADS];
+
+    /* Get input arguments */
+    if (argc != 3) {
+        fprintf(stderr, "usage: %s <nthreads> <log_nelems>\n", argv[0]);
+        exit(0);
+    }
+    nthreads = atoi(argv[1]);
+    log_nelems = atoi(argv[2]);
+    nelems = (1L << log_nelems);
+    nelems_per_thread = nelems / nthreads;
+    sem_init(&mutex, 0, 1);
+
+    /* Create peer threads and wait for them to finish */
+    for (i = 0; i < nthreads; i++) {
+        myid[i] = i;
+        Pthread_create(&tid[i], NULL, sum_mutex, &myid[i]);
+    }
+    for (i = 0; i < nthreads; i++)
+        Pthread_join(tid[i], NULL);
+
+    if (gsum != (nelems * (nelems - 1)) / 2)
+        printf("Error: result=%ld\n", result);
+
+    exit(0);
+}
+
+// psum-mutex
+void* sum_mutex(void* vargp) {
+    long myid = *((long*)vargp);
+    long start = myid * nelems_per_thread;
+    long end = start + nelems_per_thread;
+    long i;
+
+    for (i = start; i < end; i++) {
+        P(&mutex);
+        gsum += i;
+        V(&mutex);
+    }
+
+    return NULL;
+}
+```
+
+在四核系统上对 $n=2^{31}$ 的序列求和，发现结果非常古怪：**多线程版本运行得比单线程还慢**，而且线程数越多，性能越差。
+
+这是因为**同步操作（$P$ 和 $V$）的开销太大，超过了内存更新的开销**。并行编程中，要尽量避免同步操作，若无法避免，则用尽可能多的有效计算弥补同步操作的开销。
+
+作为改进，我们令每个对等线程在一个私有的变量中计算它们的部分和，主线程将这些部分和相加得到最终结果。
+
+```c
+// psum-array
+void* sum_array(void* vargp) {
+    long myid = *((long*)vargp);
+    long start = myid * nelems_per_thread;
+    long end = start + nelems_per_thread;
+    long i;
+
+    for (i = start; i < end; i++)
+        psum[myid] += i;
+
+    return NULL;
+}
+```
+
+重新测试后，我们发现它比 `psum-mutex` 快了好几个数量级。
+
+用局部变量消除对 `psum` 的不必要的内存引用，性能还会进一步提高。
+
+```c
+// psum-local
+void* sum_local(void* vargp) {
+    long myid = *((long*)vargp);
+    long start = myid * nelems_per_thread;
+    long end = start + nelems_per_thread;
+    long i, sum = 0;
+
+    for (i = start; i < end; i++)
+        sum += i;
+    psum[myid] = sum;
+
+    return NULL;
+}
+```
+
+![](images/12-34-并行psum性能.png)
+
+### 刻画并行程序的性能
+
+![](images/12-35-psum-local的性能.png)
+
+`psum-local` 的性能在线程数为 $4$ 时到达最低，这是因为我们的系统是四核的。在线程数少于 $4$ 时，线程数翻倍，运行时间近似地减半；在线程数多于 $4$ 时，随着线程数增加，运行时间略微增加。
+
+并行程序的**加速比**（speedup）定义为
+
+$$S_p = \frac{T_1}{T_p},$$
+
+其中 $p$ 是处理器核心数，$T_k$ 是程序在 $k$ 个核心上运行的时间。它有时被称为**强扩展**（strong scaling）。当 $T_1$ 是程序顺序执行版本的运行时间时，$S_p$ 称为**绝对加速比**（absolute speedup）。当 $T_1$ 是程序的并行版本在单核上的运行时间时，$S_p$ 称为**相对加速比**（relative speedup）。
+
+绝对加速比比相对加速比更能反映并行的真实好处，因为当并行程序在单核上运行时，也会受到同步开销的影响。但绝对加速比更难测量，因为它要求程序有一个顺序执行版本。
+
+**效率**（efficiency）被定义为
+
+$$E_p = \frac{S_p}{p} = \frac{T_1}{pT_p}.$$
+
+它通常被表示为 $(0,100]$ 之间的百分数，衡量并行化造成的开销。高效率的程序的运行时间集中在有用的工作上，不在同步和通信上浪费过多时间。
+
+加速比还有另外一面，称为**弱扩展**（weak scaling）。它在增加处理器核心数的同时增大问题规模，使得每个核心负责的工作量保持不变。这种语境中，加速比和效率被表达为单位时间完成的工作总量。
+
+弱扩展常常是比强扩展更真实的测量值，它更接近于现实任务。
+
+## 其他并发问题
+
+我们用线程为例讨论一些并发问题，但这些问题并不仅限于线程，它们在任何并发流操作共享资源时都会出现。
+
+### 线程安全
+
+**线程安全**（thread-safe）的函数在被多个并发线程反复地调用时能正确地工作。
+
+**不保护共享变量的函数**是线程不安全的。
+
+**保持跨越多个调用的状态的函数**是线程不安全的。例如以下的 `rand` 函数，它的当前调用的结果依赖于上一次调用的中间结果。
+
+```c
+unsigned next_seed = 1;
+
+/* rand - return pseudo-random integer on [0, 2^15 - 1] */
+int rand(void) {
+    next_seed = next_seed * 1103515245 + 12543;
+    return (unsigned int)(next_seed >> 16) % 32768;
+}
+
+/* srand - set the initial seed for rand() */
+void srand(unsigned int seed) {
+    next_seed = seed;
+}
+```
+
+当调用 `srand` 为 `rand` 指定一个种子后，单线程地反复调用 `rand` 可以得到一个可重复的随机数序列。但如果以多线程调用 `rand`，这种假设就不再成立。
+
+唯一的解决方案是重写 `rand`，使它不再依赖于静态数据，而是依靠调用者在参数中传递状态信息。这不得不修改调用者的代码，非常麻烦。
+
+**返回指向静态变量指针的函数**是线程不安全的。`ctime` 和 `gethostbyname` 将计算结果放在一个静态变量里，然后返回指向这个静态变量的指针。
+
+我们可以重写此函数，使得调用者传递存放结果变量的地址，这消除了共享数据，但要求更改调用者代码。
+
+另一种选择是采用**加锁-复制**（lock-and-copy）技术。在每次调用前对互斥锁加锁，将结果复制到一个私有的内存位置，然后对互斥锁解锁。我们可以定义一个 wrapper function 包装此过程。
+
+然而加锁复制有很多缺点，如引入额外的**同步开销**，对于复杂的结构还必须**深复制**。
+
+```c
+// ctime 的一个线程安全版本
+char* ctime_ts(const time_t* timep, char* privatep) {
+    char* sharedp;
+
+    P(&mutex);
+    sharedp = ctime(timep);
+    strcpy(buf, sharedp);
+    V(&mutex);
+    return privatep;
+}
+```
+
+**调用线程不安全函数的函数可能是**线程不安全的。如果被调用的函数是第一类或第三类线程不安全函数，并且调用函数用互斥锁保护了调用，那么调用函数是线程安全的。
+
+### 可重入性
+
+**可重入**（reentrant）函数是线程安全的函数的一个真子集，它们在被多个线程调用时，**不会访问任何共享数据**。
+
+可重入函数通常比不可重入的线程安全函数更高效，因为它们不需要同步操作。
+
+以下是 `rand` 函数的可重入版本，我们用调用者传递的指针参数取代了静态的 `next` 变量。
+
+```c
+int rand_r(unsigned int* nextp) {
+    *nextp = *nextp * 1103515245 + 12543;
+    return (unsigned int)(*nextp >> 16) % 32768;
+}
+```
+
+如果**所有函数参数都按值传递**，且引用的所有变量都是当前块作用域的自动局部变量，函数就是**显式可重入**（explicitly reentrant）的。
+
+如果函数的参数有按指针传递的，那么它是一个**隐式可重入**（implicitly reentrant）的函数。如果调用者小心地传递指向非共享数据的指针，它是可重入的。`rand_r` 就是隐式可重入的。
+
+### 在线程化的程序中使用已存在的库函数
+
+多数 Linux 函数，包括标准库中的 `malloc`、`free`、`printf`、`scanf` 等，都是线程安全的。
+
+![](images/12-41-常见的线程不安全标准库函数.png)
+
+`strtok` 已弃用。
+
+`asctime`、`ctime`、`localtime` 是在不同时间和数据格式间转换时经常使用的函数。
+
+`gethostbyname`、`gethostbyaddr` 和 `inet_ntoa` 是已弃用的网络编程函数，已经被可重入的 `getaddrinfo`、`getnameinfo` 和 `inet_ntop` 取代。
+
+除了 `rand` 和 `strtok` 以外，这些线程不安全函数都是第三类的，它们返回一个指向静态变量的指针。
+
+Linux 提供了大多数线程不安全函数的可重入版本，它们一般以 `_r` 结尾。
+
+### 竞争
+
+如果程序的正确性依赖于**某线程必须在另一个线程到达 $y$ 位置之前到达 $x$ 位置**，那么就会发生竞争。
+
+```c
+// This code is buggy
+#include "csapp.h"
+
+#define N 4
+
+void* thread(void* vargp);
+
+int main(void) {
+    pthread_t tid[N];
+    int i;
+
+    for (i = 0; i < N; i++)
+        Pthread_create(&tid[i], NULL, thread, &i);
+    for (i = 0; i < N; i++)
+        Pthread_join(tid[i], NULL);
+
+    exit(0);
+}
+
+void* thread(void* vargp) {
+    int myid = *((int*)vargp);
+    printf("Hello from thread %d\n", myid);
+    return NULL;
+}
+```
+
+以上程序中，主线程中 **`i` 自增运算和线程例程中第一句赋值语句**之间存在竞争。
+
+为了避免竞争，我们需要为每个传入的参数动态分配一个私有的内存位置。
+
+注意，**必须在线程例程中释放这个内存位置**，否则会造成内存泄漏。
+
+```c
+// ...
+int main(void) {
+    pthread_t tid[N];
+    int i;
+    int* ptr;
+
+    for (i = 0; i < N; i++) {
+        ptr = Malloc(sizeof(int));
+        *ptr = i;
+        Pthread_create(&tid[i], NULL, thread, ptr);
+    }
+    for (i = 0; i < N; i++)
+        Pthread_join(tid[i], NULL);
+
+    exit(0);
+}
+
+void* thread(void* vargp) {
+    int myid = *((int*)vargp);
+    Free(vargp);
+    printf("Hello from thread %d\n", myid);
+    return NULL;
+}
+```
+
+### 死锁
+
+**死锁**（deadlock）指一组线程被永久地阻塞了。下图展示了一对用两个信号量实现互斥的线程的进度图。
+
+![](images/12-44-死锁进度图.png)
+
+**程序员使用 $P$ 和 $V$ 操作顺序不当**，以至于**两个信号量的禁止区域重叠**。两个禁止区完全包围住了死锁区域的右方和上方，使得进入死锁区域的轨迹线永远无法离开死锁区域。
+
+死锁是很困难的问题，它们不可预测，极难复现。
+
+使用二元信号量实现互斥时，只要遵循互斥锁加锁顺序规则，就不会发生死锁。
+
+**互斥锁加锁顺序规则**：给定所有互斥操作的一个全序，如果每个线程都以同一种顺序加锁，并以相反的顺序解锁，那么就不会发生死锁。
+
+例如，在上述程序中，我们在每个线程中先对 `s` 加锁，再对 `t` 加锁，就解决了死锁问题。
+
+![](images/12-45-无死锁的程序.png)
 
