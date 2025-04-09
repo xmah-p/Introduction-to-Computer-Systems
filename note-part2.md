@@ -636,13 +636,11 @@ for (sec : sections) {
         else if (r.type == R_X86_64_32) {
             *refptr = (unsigned) (ADDR(r.symbol) + r.addend);
         }
-
-        // For PC-relative references, addend equals to the length of the address (in this case, 4), b/c PC = refaddr + length
-
-        // For absolute references, addend is zero
     }
 }
 ```
+
+**对于 PC 相对引用，`addend` 通常等于地址长度的相反数**。**对于绝对引用，`addend` 为零**。对于 PC 相对引用，被填入的地址是引用指令下一条指令的地址到符号真实地址的偏移量，`addend` 用于补齐 `r.offset` 和下一条指令的地址之间的差值。
 
 以如下代码为例，`main` 函数分别用 PC 相对引用和绝对引用的方式引用了全局符号 `sum` 和 `array`。
 
@@ -757,7 +755,7 @@ ELF 被设计地很容易加载到内存。可执行文件的连续的**片**（
 
 $$\text{vaddr}\equiv\text{off}\pmod{\text{align}},$$
 
-其中 `off` 是**段的首字节在目标文件中的偏移量**，`align` 是程序头部中指定的对齐（此处为 $2^{21}=0x200000$）。这种对齐加快了段传送到内存的效率。
+其中 `off` 是**段的首字节在目标文件中的偏移量**，`align` 是程序头部表中指定的对齐（此处为 $2^{21}=0x200000$）。这种对齐加快了段传送到内存的效率。
 
 ## 加载可执行目标文件
 
@@ -1567,7 +1565,7 @@ int main() {
 
 两个进程拥有**相同且独立的地址空间**。创建子进程后，父进程对状态的改变不会反映在子进程，子进程的改变也不会影响父进程。
 
-父进程和子进程**共享文件**，父进程的 `stdout` 文件是打开的，且指向屏幕，所以子进程也继承了它，同样指向屏幕。
+父进程和子进程**共享文件描述符表**，父进程的 `stdout` 文件是打开的，且指向屏幕，所以子进程也继承了它，同样指向屏幕。
 
 ![](images/8-16-进程图.png)
 
@@ -1894,7 +1892,7 @@ int main() {
 |  17  |  $\text{SIGCHLD}$  |                忽略                 |        子进程终止或停止         |
 |  18  |  $\text{SIGCONT}$  |                忽略                 |     继续执行一个停止的进程      |
 |  19  |  $\text{SIGSTOP}$  | 停止（直到下一个 $\text{SIGCONT}$） |     不是来自终端的停止信号      |
-|  20  |  $\text{SIGTSTP}$  | 停止（直到下一个 $\text{SIGCONT}$） |       来自终端的停止信号        |
+|  20  |  $\text{SIGTSTP}$  | 停止（直到下一个 $\text{SIGCONT}$） | 来自终端的停止信号（`Ctrl+Z`）  |
 |  21  |  $\text{SIGTTIN}$  | 停止（直到下一个 $\text{SIGCONT}$） |      后台进程试图从终端读       |
 |  22  |  $\text{SIGTTOU}$  | 停止（直到下一个 $\text{SIGCONT}$） |      后台进程试图向终端写       |
 |  23  |  $\text{SIGURG}$   |                忽略                 |       套接字上的紧急情况        |
@@ -2029,10 +2027,12 @@ unsigned int alarm(unsigned int secs);
 
 ### 接收信号
 
-当内核将进程 `p` 由内核模式切换到用户模式时，它会检查 `p` 的未被阻塞的待处理信号集合：
+**当内核将进程 `p` 由内核模式切换到用户模式时，它会检查 `p` 的未被阻塞的待处理信号集合**：
 
 - 如果该集合为空，内核将控制传递到 `p` 的逻辑控制流中的下一条指令 $I_{\text{next}}$
 - 否则内核选择集合中的某个信号 `k`（通常是最小的 `k`），并强制 `p` 接收 `k`。此后，控制传递回 $I_{\text{next}}$
+
+> `printf` 会加锁访问输出端。如果进程在执行 `printf` 到对输出端加锁但尚未解锁时被抢占，那么它下一次被调度时，内核会先检查进程的待处理信号集合。如果存在未处理信号，则会先调用信号处理程序。如果信号处理程序内调用了 `printf`，由于先前对输出端的锁尚未解除，进程会死锁。
 
 每种信号都有一个默认行为，它是以下的一种：
 
@@ -2944,17 +2944,17 @@ CR3 控制寄存器指向第一级页表 L1 的基址。CR3 的值是每个进�
 
 ![](images/9-23-PTE格式.png)
 
-|   字段    |                                 描述                                 |
-| :-------: | :------------------------------------------------------------------: |
-|     P     |                     子页表是否已缓存到物理内存中                     |
-|    R/W    |                    对所有可访问页，只读或读写权限                    |
-|    U/S    |            对所有可访问页，用户或超级用户（内核）模式权限            |
-|    WT     |                      子页表采用直写还是写回策略                      |
-|    CD     |                         子页表是否可以被缓存                         |
-|     A     |              引用位，由 MMU 在读或写时设置，由软件清除               |
-|    PS     | 页大小，可以为 $4 \text{KB}$ 或 $4 \text{MB}$（只对第一层 PTE 定义） |
-| Base addr |                     子页表的物理基址的高 $40$ 位                     |
-|    XD     |                    对所有可访问页，是否允许取指令                    |
+|   字段    |                                       描述                                       |
+| :-------: | :------------------------------------------------------------------------------: |
+|     P     |                      (Present) 子页表是否已缓存到物理内存中                      |
+|    R/W    |             (Read-only or read/write) 对所有可访问页，只读或读写权限             |
+|    U/S    |       (User or supervisor) 对所有可访问页，用户或超级用户（内核）模式权限        |
+|    WT     |             (Write-through or write-back) 子页表采用直写还是写回策略             |
+|    CD     |                      (Cache disabled) 子页表是否可以被缓存                       |
+|     A     |               (Accessed) 引用位，由 MMU 在读或写时设置，由软件清除               |
+|    PS     | (Page size) 页大小，可以为 $4 \text{KB}$ 或 $4 \text{MB}$（只对第一级 PTE 定义） |
+| Base addr |                           子页表的物理基址的高 $40$ 位                           |
+|    XD     |                (eXecute disasbled) 对所有可访问页，是否允许取指令                |
 
 Linux 中，$P$ 总是为 $1$，此时地址字段包含一个 $40$ 位 PPN，它指向下一级页表的基址。这要求物理页表必须 **$4 \text{KB}$ 对齐**。
 
@@ -2962,18 +2962,18 @@ Linux 中，$P$ 总是为 $1$，此时地址字段包含一个 $40$ 位 PPN，�
 
 ![](images/9-24-PTE格式.png)
 
-|   字段    |                            描述                            |
-| :-------: | :--------------------------------------------------------: |
-|     P     |                子页表是否已缓存到物理内存中                |
-|    R/W    |                  对于子页，只读或读写权限                  |
-|    U/S    |          对于子页，用户或超级用户（内核）模式权限          |
-|    WT     |                  子页采用直写还是写回策略                  |
-|    CD     |                     子页是否可以被缓存                     |
-|     A     | 引用位（reference bit）。由 MMU 在读和写时设置，由软件清除 |
-|     D     |   修改位（dirty bit）。由 MMU 在读和写时设置，由软件清除   |
-|     G     |  全局位。如果设置，那么任务切换时，它不会从 TLB 中被驱逐   |
-| Base addr |                 子页的物理基址的高 $40$ 位                 |
-|    XD     |                  对于子页，是否允许取指令                  |
+|   字段    |                                 描述                                  |
+| :-------: | :-------------------------------------------------------------------: |
+|     P     |                (Present) 子页表是否已缓存到物理内存中                 |
+|    R/W    |          (Read-only or read/write) 对于子页，只读或读写权限           |
+|    U/S    |     (User or supervisor) 对于子页，用户或超级用户（内核）模式权限     |
+|    WT     |        (Write-through or write-back) 子页采用直写还是写回策略         |
+|    CD     |                  (Cache disabled) 子页是否可以被缓存                  |
+|     A     | (Accessed) 引用位（reference bit）。由 MMU 在读和写时设置，由软件清除 |
+|     D     |  (Dirty bit) 修改位（dirty bit）。由 MMU 在读和写时设置，由软件清除   |
+|     G     |   (Global) 全局位。如果设置，那么任务切换时，它不会从 TLB 中被驱逐    |
+| Base addr |                      子页的物理基址的高 $40$ 位                       |
+|    XD     |             (eXecute disasbled) 对于子页，是否允许取指令              |
 
 XD 位是 $64$ 位系统引入的，这使得内核降低了缓冲区溢出攻击的风险。
 
@@ -3005,7 +3005,9 @@ Linux 为每个进程维护一个独立的虚拟地址空间：
 
 内核虚拟内存包括**内核中的代码和数据结构**。
 
-内核虚拟内存的某些区域被映射到了**所有进程共享的物理页面**。Linux 也将一组连续的虚拟页（大小等于系统中 DRAM 的总量）映射到一组连续的物理页，为内核提供了一个便利的访问物理内存任何位置的方法（例如访问页表或某些被映射到物理内存的 I/O 设备）。
+内核虚拟内存的某些区域被映射到了**所有进程共享的物理页**，例如内核的代码和全局数据结构等
+
+Linux 也将一组连续的虚拟页（大小等于系统中 DRAM 的总量）映射到一组连续的物理页，为内核提供了一个便利的访问物理内存任何位置的方法（例如访问页表或某些被映射到物理内存的 I/O 设备）。
 
 内核虚拟内存的其他区域包含了**每个进程都不相同的数据**，例如页表、内核在进程上下文中使用的栈，以及记录虚拟地址空间当前组织的数据结构。
 
@@ -3137,6 +3139,7 @@ void* mmap(void* start, size_t length, int prot, int flags, int fd, off_t offset
 #include <sys/mman.h>
 
 // 删除 start 起 length 字节长度的区域
+// 返回：若成功，返回 0；若出错，返回 -1
 int munmap(void* start, size_t length);
 ```
 
@@ -3964,7 +3967,7 @@ int open(char* filename, int flags, mode_t mode);
 - $\text{S\_IWOTH}$：Others 可写
 - $\text{S\_IXOTH}$：Others 可执行
 
-其中 $S$ 代表 STAT，$I$ 代表 INODE。
+其中 $\text{S}$ 代表 STAT，$\text{I}$ 代表 INODE。
 
 每个进程都有一个 `umask`，它是通过调用 `umask` 函数来设置的，它是**进程上下文的一部分**。
 
@@ -4115,7 +4118,7 @@ static ssize_t rio_read(rio_t* rp, char* usrbuf, size_t n) {
     while (rp->rio_cnt <= 0) {  // refill if buf is empty
         rp->rio_cnt = read(rp->rio_fd, rp->rio_buf, sizeof rp->rio_buf);
 
-        if (rp->rio_cnt < 0) {    
+        if (rp->rio_cnt < 0) {
             if (errno != EINTR)  // interrupted by sig handler return
                 return -1;
         }
@@ -4360,10 +4363,12 @@ extern FILE* stderr;   // standard error
 
 标准 I/O 流是**全双工**（full duplex）的，即程序可以在同一个流上执行输入和输出。但对流的限制和对套接字的限制有时会冲突。
 
-- **输出函数之后的输入函数**：如果中间没有插入 `fflush`、`fseek`、`fsetpos` 或 `rewind`，那么输入函数不能跟随在一个输出函数之后。`fflush` 清空与流相关的缓冲区，而后三者使用 Unix I/O `lseek` 函数来重置当前文件位置。
-- **输入函数之后的输出函数**：如果中间没有插入 `fseek`、`fsetpos` 或 `rewind`，那么输出函数不能跟随在一个输入函数之后。**除非输入函数遭遇了 EOF**。
+大多数情况下，我们从流的开头读，在流的结尾写。在这种情形下，
 
-这两个限制给网络应用带来了麻烦。
+- **输出函数之后的输入函数**：写操作之后需要先调用 `fflush`、`fseek`、`fsetpos` 或 `rewind`，然后才能开始读。`fflush` 清空与流相关的缓冲区，而后三者使用 Unix I/O `lseek` 函数来重置当前文件位置。
+- **输入函数之后的输出函数**：读操作之后需要先调用 `fseek`、`fsetpos` 或 `rewind` 改变当前文件位置，然后才能开始写，**除非输入函数遭遇了 EOF**。
+
+这两个限制给网络应用带来了麻烦。而且，套接字本质是全双工的，不能很好地用标准库流来抽象。
 
 第一个限制可以通过每次输入前调用 `fflush` 解决，然而由于对套接字调用 `lseek` 函数是非法的，解决第二个限制的唯一办法是**对同一个打开的套接字描述符打开两个流**，一个读，一个写。
 
@@ -4427,6 +4432,8 @@ fclose(fpout);
 ![](images/11-4-桥接以太网.png)
 
 网桥比集线器更充分地利用了电缆带宽。它们可以学习哪个主机通过哪个端口可达，只在有必要时，有选择地将帧从一个端口复制到其他端口。
+
+网桥先判断目的地址是否在表中，如果在表中，则复制到对应的端口；如果不在，将此帧复制到所有端口，被目的主机接收后更新表项。
 
 例如，如果主机 A 发送一个帧到同网段的主机 B，那么当这个帧到达网桥 X 的输入端口时，X 就会丢弃它。如果 A 发送一个帧到另一个网段的主机 C，那么 X 只会将此帧复制到和网桥 Y 相连的端口上，Y 只会将此帧复制到和 C 所在的网段连接的端口。
 
@@ -4571,7 +4578,7 @@ Internet 客户端和服务器通过在**连接**（connection）上发送和接
 
 客户端进程发起一个连接请求时，内核自动分配客户端套接字地址中的端口，称为**临时端口**（ephemeral port）。**临时端口的范围是 $1024\sim 5000$**。
 
-服务器套接字地址中的端口通常是某个永久与该服务绑定的**知名端口**（well-known port），每个具有知名端口的服务都有一个对应的**知名服务名**（well-known service name）。例如，Web 服务器通常使用端口 `80`，知名服务名是 `http`，电子邮件服务器通常使用端口 `25`，知名服务名是 `smtp`。
+服务器套接字地址中的端口通常是某个永久与该服务绑定的**知名端口**（well-known port），范围是 $0\sim 1023$。每个具有知名端口的服务都有一个对应的**知名服务名**（well-known service name）。例如，Web 服务器通常使用端口 `80`，知名服务名是 `http`，电子邮件服务器通常使用端口 `25`，知名服务名是 `smtp`。
 
 `/etc/services` 文件列出了机器提供的知名名字和知名端口的映射。
 
@@ -4807,13 +4814,13 @@ struct addrinfo {
 
 `hints` 参数是可选的，它提供对返回的链表更好的控制。传递的 `hints` 参数指向的结构体只能设置以下字段，其余字段必须被置零：
 
-- `ai_family`：设置为 $AF\_INET$ 将限制为 IPv4 地址，设置为 $AF\_INET6$ 将限制为 IPv6 地址
-- `ai_socktype`：`getaddrinfo` 默认最多返回三个 `addrinfo` 结构体，它们的 `ai_socktype` 字段不同：一个是连接，一个是数据报，一个是原始套接字。设置为 $SOCK\_STREAM$ 将限制为对每个地址最多一个 `addrinfo` 结构体，对应连接。
+- `ai_family`：设置为 $\text{AF\_INET}$ 将限制为 IPv4 地址，设置为 $\text{AF\_INET6}$ 将限制为 IPv6 地址
+- `ai_socktype`：`getaddrinfo` 默认最多返回三个 `addrinfo` 结构体，它们的 `ai_socktype` 字段不同：一个是连接，一个是数据报，一个是原始套接字。设置为 $\text{SOCK\_STREAM}$ 将限制为对每个地址最多一个 `addrinfo` 结构体，对应连接。
 - `ai_flags`：一个位掩码，包括以下标志，它们可以用或运算组合：
-  - $AI\_ADDRCONFIG$：对于连接来说推荐。只返回适用于主机的地址，主机是 IPv4，就只返回 IPv4 地址；主机是 IPv6，就只返回 IPv6 地址。
-  - $AI\_CANONNAME$：`ai_canonname` 字段默认为 `NULL`，设置此标志将使得 `getaddrinfo` 将链表中首个 `addrinfo` 结构体的 `ai_canonname` 置为主机的规范名（canonical name）。
-  - $AI\_NUMERICSERV$：`service` 参数默认为服务名或端口号，此标志强制 `service` 参数为端口号。
-  - $AI\_PASSIVE$：`getaddrinfo` 返回的默认为套接字地址，客户端可以在调用 `connect` 时将其用作主动套接字。设置此标志令 `getaddrinfo` 返回可以被服务器用作监听套接字的**通配符地址**（wildcard address），告诉内核这个服务器会接受发送到该主机所有 IP 地址的请求。此时，`host` 参数应为 `NULL`
+  - $\text{AI\_ADDRCONFIG}$：对于连接来说推荐。只返回适用于主机的地址，主机是 IPv4，就只返回 IPv4 地址；主机是 IPv6，就只返回 IPv6 地址。
+  - $\text{AI\_CANONNAME}$：`ai_canonname` 字段默认为 `NULL`，设置此标志将使得 `getaddrinfo` 将链表中首个 `addrinfo` 结构体的 `ai_canonname` 置为主机的规范名（canonical name）。
+  - $\text{AI\_NUMERICSERV}$：`service` 参数默认为服务名或端口号，此标志强制 `service` 参数为端口号。
+  - $\text{AI\_PASSIVE}$：`getaddrinfo` 返回的默认为套接字地址，客户端可以在调用 `connect` 时将其用作主动套接字。设置此标志令 `getaddrinfo` 返回可以被服务器用作监听套接字的**通配符地址**（wildcard address），告诉内核这个服务器会接受发送到该主机所有 IP 地址的请求。此时，`host` 参数应为 `NULL`
 - `ai_protocol`
 
 `getaddrinfo` 的一个重要好处在于 `addrinfo` 结构体的字段是**不透明**的，程序员可以直接将它们传递给套接字接口中的函数，使得代码可移植性更好。
@@ -4847,8 +4854,8 @@ int getnameinfo(const struct sockaddr* sa, socklen_t salen,
 
 `flags` 是一个位掩码，包括以下标志，它们可以用或运算组合：
 
-- $NI\_NUMERICHOST$：`getnameinfo` 默认返回 `host` 的域名，设置此标志将使得 `getnameinfo` 返回 `host` 的点分十进制 IP 地址
-- $NI\_NUMERICSERV$：`getnameinfo` 默认检查 `/etc/services`，优先返回 `service` 的服务名，设置此标志将使得 `getnameinfo` 跳过查找，直接返回 `service` 的端口号
+- $\text{NI\_NUMERICHOST}$：`getnameinfo` 默认返回 `host` 的域名，设置此标志将使得 `getnameinfo` 返回 `host` 的点分十进制 IP 地址
+- $\text{NI\_NUMERICSERV}$：`getnameinfo` 默认检查 `/etc/services`，优先返回 `service` 的服务名，设置此标志将使得 `getnameinfo` 跳过查找，直接返回 `service` 的端口号
 
 以下示例程序使用 `getaddrinfo` 和 `gethostinfo` 展示域名和它关联的 IP 地址的映射，类似于 `nslookup`：
 
@@ -5026,7 +5033,7 @@ int main(int argc, char** argv) {
         Rio_readlineb(&rio, buf, MAXLINE);
         Fputs(buf, stdout);
     }
-    Close(clientfd);  
+    Close(clientfd);
     exit(0);
 }
 ```
@@ -5140,7 +5147,7 @@ telnet www.aol.com 80
 Trying 205.188.146.23...
 Connected to aol.com.
 Escape character is '^]'.
-GET / HTTP/1.0      
+GET / HTTP/1.0
 Host: www.aol.com
 
 HTTP/1.0 200 OK
@@ -5174,7 +5181,7 @@ HTTP 支持多种**方法**（method），包括 $\text{GET}, \text{POST}, \text
 
 请求报头为服务器提供额外信息。`Host` 报头只在 HTTP/1.1 中是需要的。
 
-**代理缓存**（proxy cache）使用 `Host` 报头，它有时作为浏览器和管理被请求文件的**原始服务器**（origin server）的中介。客户端和原始服务器之间可以由多个代理，即**代理链**（proxy chain）。`Host` 报头中的数据指示了原始服务器的域名，代理可以利用它判断是否可以在本地缓存中拥有一个被请求内容的副本。
+**代理缓存**（proxy cache）会使用 `Host` 报头，它有时作为浏览器和管理被请求文件的**原始服务器**（origin server）的中介。客户端和原始服务器之间可以由多个代理，即**代理链**（proxy chain）。`Host` 报头中的数据指示了原始服务器的域名，代理可以利用它判断是否可以在本地缓存中拥有一个被请求内容的副本。
 
 #### HTTP 响应
 
@@ -5187,15 +5194,15 @@ HTTP 支持多种**方法**（method），包括 $\text{GET}, \text{POST}, \text
 
 对于响应行，`version` 字段描述响应的 HTTP 版本。**状态码**（status-code）是一个 $3$ 位正整数，指明对请求的处理结果。**状态消息**（status message）给出状态码的描述。
 
-| 状态码 | 状态消息 | 描述 |
-| :---: | :---: | :--- |
-| 200 | OK | 请求成功 |
-| 301 | Moved Permanently | 内容已移动到 location 头中指明的主机 |
-| 400 | Bad Request | 错误请求 |
-| 403 | Forbidden | 服务器无权访问所请求的文件 |
-| 404 | Not Found | 服务器无法找到所请求的文件 |
-| 501 | Not Implemented | 服务器不支持所请求的方法 |
-| 505 | HTTP Version Not Supported | 服务器不支持请求的 HTTP 版本 |
+| 状态码 |          状态消息          | 描述                                 |
+| :----: | :------------------------: | :----------------------------------- |
+|  200   |             OK             | 请求成功                             |
+|  301   |     Moved Permanently      | 内容已移动到 location 头中指明的主机 |
+|  400   |        Bad Request         | 错误请求                             |
+|  403   |         Forbidden          | 服务器无权访问所请求的文件           |
+|  404   |         Not Found          | 服务器无法找到所请求的文件           |
+|  501   |      Not Implemented       | 服务器不支持所请求的方法             |
+|  505   | HTTP Version Not Supported | 服务器不支持请求的 HTTP 版本         |
 
 ### 服务动态内容
 
@@ -5223,15 +5230,15 @@ GET /cgi-bin/adder?15000&213 HTTP/1.1
 
 CGI 定义了大量的环境变量。
 
-| 环境变量 | 描述 |
-| :---: | :--- |
-| $\text{QUERY\_STRING}$ | 程序参数 |
-| $\text{SERVER\_PORT}$ | 父进程监听的端口号 |
-| $\text{REQUEST\_METHOD}$ | 请求方法 |
-| $\text{REMOTE\_HOST}$ | 客户端域名 | 
-| $\text{REMOTE\_ADDR}$ | 客户端点分十进制 IP 地址 |
-| $\text{CONTENT\_TYPE}$ | 只对 $\text{POST}$ 有意义：请求体的 MIME 类型 |
-| $\text{CONTENT\_LENGTH}$ | 只对 $\text{POST}$ 有意义：请求体的字节长度 |
+|         环境变量         | 描述                                          |
+| :----------------------: | :-------------------------------------------- |
+|  $\text{QUERY\_STRING}$  | 程序参数                                      |
+|  $\text{SERVER\_PORT}$   | 父进程监听的端口号                            |
+| $\text{REQUEST\_METHOD}$ | 请求方法                                      |
+|  $\text{REMOTE\_HOST}$   | 客户端域名                                    |
+|  $\text{REMOTE\_ADDR}$   | 客户端点分十进制 IP 地址                      |
+|  $\text{CONTENT\_TYPE}$  | 只对 $\text{POST}$ 有意义：请求体的 MIME 类型 |
+| $\text{CONTENT\_LENGTH}$ | 只对 $\text{POST}$ 有意义：请求体的字节长度   |
 
 #### 子进程将其输出发送到哪里
 
@@ -5553,7 +5560,7 @@ int main(int argc, char** argv) {
 
 ### 进程的优劣
 
-父子进程**共享文件表**，但拥有独立的地址空间。一个进程不会不小心覆盖另一个进程的虚拟内存，这是一个明显的优点。
+父子进程**共享文件描述符表**，但拥有独立的地址空间。一个进程不会不小心覆盖另一个进程的虚拟内存，这是一个明显的优点。
 
 但独立的地址空间使得进程之间共享状态信息变得困难，我们不得不使用开销较大的 IPC 机制。
 
@@ -5578,7 +5585,15 @@ int select(int n, fd_set* fdset, NULL, NULL, NULL);
 
 `select` 将 `fdset` 修改为**准备好集合**（ready set），它包括已准备好的描述符。`select` 函数的返回值是准备好的描述符的数目。我们需要在每次调用 `select` 时都更新读集合。
 
-我们定义由监听描述符和标准输入组成的读集合，然后调用 `select`。如果监听描述符准备好了，我们就调用 `accept` 接受连接请求。如果标准输入准备好了，我们就调用 `command` 处理命令。
+```c
+// 操作描述符集合的宏
+FD_ZERO(fd_set *fdset); /* Clear all bits in fdset */
+FD_CLR(int fd, fd_set *fdset); /* Clear bit fd in fdset */
+FD_SET(int fd, fd_set *fdset); /* Turn on bit fd in fdset */
+FD_ISSET(int fd, fd_set *fdset); /* Is bit fd in fdset on? */
+```
+
+读集合由**监听描述符和标准输入**组成。我们调用 `select`。如果监听描述符准备好了，我们就调用 `accept` 接受连接请求。如果标准输入准备好了，我们就调用 `command` 处理命令。
 
 ```c
 #include "csapp.h"
@@ -5644,7 +5659,7 @@ void command(void) {
 #include "csapp.h"
 
 /* A pool of connected descriptors */
-typedef struct {    
+typedef struct {
     int maxfd;  /* Largest descriptor in read_set */
     fd_set read_set;  /* Set of all active descriptors */
     fd_set ready_set;  /* Subset of descriptors ready for reading */
@@ -5791,7 +5806,6 @@ Posix 线程（Pthreads）是在 C 中处理线程的一个标准接口。Pthrea
 最后，主线程调用 `exit`，终止了当前进程中的所有线程（此例中，只有主线程）。
 
 线程的代码和本地数据被封装在一个**线程例程**（thread routine）中，它的类型应当是 `void*(void*)`。
-
 
 ```c
 #include "csapp.h"
@@ -6069,7 +6083,6 @@ void* thread(void* vargp) {
 
 我们将线程 $i$ 的循环代码分解成五部分：$H_i, L_i, U_i, S_i, T_i$。
 
-
 ```c
 for (i = 0; i < niters; i++)
     cnt++;
@@ -6158,7 +6171,7 @@ void V(sem_t* sem);
 
 这种信号量称为**二元信号量**（binary semaphore），因为它的值只能是 $0$ 或 $1$。以提供互斥为目的的二元信号量也称为**互斥锁**（mutex）。
 
-在互斥锁上执行 $P$ 操作称为对互斥锁**加锁**，执行 $V$ 操作称为对互斥锁**解锁**。称对互斥锁加了锁但还没有解锁的线程**占用**这个互斥锁。一个被用作一组可用资源的计数器的信号量称为**计数信号量**。信号量 $s<0$ 的不可行状态定义了一个**禁止区**，它覆盖了不安全区。 
+在互斥锁上执行 $P$ 操作称为对互斥锁**加锁**，执行 $V$ 操作称为对互斥锁**解锁**。称对互斥锁加了锁但还没有解锁的线程**占用**这个互斥锁。一个被用作一组可用资源的计数器的信号量称为**计数信号量**。信号量 $s<0$ 的不可行状态定义了一个**禁止区**，它覆盖了不安全区。
 
 ![](images/12-22-信号量互斥锁.png)
 
@@ -6200,6 +6213,10 @@ void* thread(void* vargp) {
 如果缓冲区已满，生产者必须等待空槽出现；如果缓冲区为空，消费者必须等待新项目被插入。
 
 我们开发一个简单 $\text{SBUF}$ 包，用于构造生产者-消费者程序。
+
+插入时，空槽数减少，项目数增加；取出时，空槽数增加，项目数减少。我们将空槽数 `slots` 和 `items` 实现为信号量，用 $P, V$ 操作来更新它们。
+
+`mutex` 是用来保护缓冲区的互斥锁
 
 ```c
 #include "csapp.h"
@@ -6259,9 +6276,11 @@ int sbuf_remove(sbuf_t* sp) {
 
 以下是对第一类读者-写者问题的解答。
 
-`mutex` 保护对 `readcnt` 的访问，它统计当前在临界区中的读者数量。第一个进入临界区的读者对 `w` 加锁，阻止写者进入临界区。最后一个离开临界区的读者对 `w` 解锁，允许写者进入临界区。除了第一个读者和最后一个读者，其他读者不会对 `w` 加锁或解锁。因此，只要有读者在临界区中，写者就不能进入临界区。
+`mutex` 保护对 `readcnt` 的访问，`readcnt` 统计当前在临界区中的读者数量。
 
-写者通过 `w` 保护对共享变量的访问，保证同时只有一个写者在临界区中。
+通过维护 `readcnt`，读者自动形成了一个读序列。
+
+第一个进入临界区的读者对 `w` 加锁，阻止写者进入临界区。最后一个离开临界区的读者对 `w` 解锁，允许写者进入临界区。同时，写者也通过 `w` 阻塞其他写者。`w` 同时实现了读序列和写者的互斥以及写者之间的互斥。
 
 ```c
 /* Solution to the first readers-writers problem */
@@ -6303,7 +6322,94 @@ void writer(void) {
 
 第二类读者-写者问题：**写者优先**，一旦有写者准备好写，它就会优先使写者完成写操作。在写者后到达的读者必须等待，即便这个写者也在等待。
 
+写序列通过 `r` 对读序列加锁，读序列的入列操作需要强制获取 `r`，从而使得写序列优先于读序列。依然通过 `w` 实现读写互斥和写者之间的互斥。
+
+```c
+int readcnt, writecnt;       /* Initially 0 */
+sem_t rmutex, wmutex, r, w;  /* Initially 1 */
+
+void reader(void) {
+    while (1) {
+        P(&r);
+        P(&rmutex);
+        readcnt++;
+        if (readcnt == 1) /* First in */
+            P(&w);
+        V(&rmutex);
+        V(&r)
+
+        /* Reading happens here */
+
+        P(&rmutex);
+        readcnt--;
+        if (readcnt == 0) /* Last out */
+            V(&w);
+        V(&rmutex);
+    }
+}
+
+void writer(void) {
+    while (1) {
+        P(&wmutex);
+        writecnt++;
+        if (writecnt == 1) P(&r);
+        V(&wmutex);
+
+        P(&w);
+        /* Writing here */
+        V(&w);
+
+        P(&wmutex);
+        writecnt--;
+        if (writecnt == 0) V(&r);
+        V(&wmutex);
+    }
+}
+```
+
 对这两种读者-写者问题的正确解答可能造成**饥饿**（starvation），即某个线程被无限期地阻塞。例如，第一类读者-写者问题中，如果有读者不断地到达，写者就可能饥饿。
+
+狒狒过峡谷问题: 狒狒分布在峡谷的东西侧，它们都想要到达对侧。峡谷之间有一条可供通过的绳索，但同时只能有一个方向的狒狒可以在绳索上，即如果绳索上同时有向西和向东的狒狒，则会死锁。
+
+`mutex` 表示绳索资源，`Wcnt` 和 `Ecnt` 分别表示向东和向西的狒狒的数量。`W` 和 `E` 保护对 `Wcnt` 和 `Ecnt` 的访问。
+
+```c
+sem_t W, E;    /* Initially 1 */
+sem_t mutex;   /* Initially 1 */
+int Wcnt = 0, Ecnt = 0;
+
+void West() {
+    while (1) {
+        P(&W);
+        if (Wcnt == 0) P(&mutex);
+        Wcnt++;
+        V(&W);
+
+        /* Cross the rope */
+
+        P(&W);
+        Wcnt--;
+        if (Wcnt == 0) V(&mutex);
+        V(&W);
+    }
+}
+
+void East() {
+    while (1) {
+        P(&E);
+        if (Ecnt == 0) P(&mutex);
+        Ecnt++;
+        V(&E);
+
+        /* Cross the rope */
+
+        P(&E);
+        Ecnt--;
+        if (Ecnt == 0) V(&mutex);
+        V(&E);
+    }
+}
+```
 
 > 信号量是简单、经典的同步线程的方法，但不是唯一的。
 > Java 线程通过 Java Monitor 机制同步，它提供了对信号量互斥和调度能力更高级别的抽象。不过，它可以用信号量实现。
@@ -6327,7 +6433,7 @@ void* thread(void* vargp);
 sbuf_t sbuf;    /* Shared buffer of connected descriptors */
 
 int main(int argc, char** argv) {
-    int i; 
+    int i;
     int listenfd, connfd;
     socklen_t clientlen;
     struct sockaddr_storage clientaddr;
@@ -6698,4 +6804,3 @@ void* thread(void* vargp) {
 例如，在上述程序中，我们在每个线程中先对 `s` 加锁，再对 `t` 加锁，就解决了死锁问题。
 
 ![](images/12-45-无死锁的程序.png)
-
